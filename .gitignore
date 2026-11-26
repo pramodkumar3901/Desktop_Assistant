@@ -1,0 +1,7 @@
+# Made by Blip on each PC
+blip_alerts.json
+blip_settings.json
+blip.log
+# One-click shortcuts point to paths on one PC; see the README to make your own
+*.lnk
+__pycache__/
