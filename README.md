@@ -63,9 +63,19 @@ Improve any text without pasting it into a chat:
 3. Blip types on its laptop for a few seconds, then puts the rewrite on your clipboard.
    Press Ctrl+V to paste.
 
-The card that appears has **Show all** (read, tweak and copy the full rewrite), **Try again**
-(another version) and **Undo** (puts your original back on the clipboard). Nothing is sent
-to Claude until you ask; each rewrite is one Claude request. Drafts up to 12,000 characters.
+The card that appears has **Chat**, **Try again** (another version) and **Undo** (puts your
+original back on the clipboard).
+
+**Chat** opens a window for going back and forth. Type what you want changed, such as
+"shorter", "less formal" or "mention Friday", and press Enter (Shift+Enter adds a line).
+Blip rewrites its latest version to match, remembering your earlier feedback, and puts the
+new one on your clipboard. Every version stays in the chat. You can also edit the newest one
+by hand: **Copy latest** copies it, and your next feedback builds on your edits. Reopen the
+chat from **Rewrite copied text → Open the draft chat**. A new rewrite starts a new chat,
+and quitting Blip forgets it.
+
+Nothing is sent to Claude until you ask. Each rewrite or piece of feedback is one Claude
+request. Drafts up to 12,000 characters.
 
 ## Accessories
 
