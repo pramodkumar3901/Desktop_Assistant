@@ -1,0 +1,24 @@
+{
+  "name": "The Robot",
+  "when": { "random": 0.6 },
+  "moves": {
+    "robot": {
+      "length": 2.4, "repeat": 3, "face": "smug", "effect": "music",
+      "keys": [
+        { "t": 0.0, "hand_left": [40, 4],   "hand_right": [14, -12], "tilt": -12, "sway": -4, "turn": -0.4 },
+        { "t": 0.4, "hand_left": [40, 4],   "hand_right": [14, -12], "tilt": -12, "sway": -4, "turn": -0.4 },
+        { "t": 0.6, "hand_left": [44, 34],  "hand_right": [40, 4],   "tilt": 0,   "sway": 0,  "turn": 0 },
+        { "t": 1.0, "hand_left": [44, 34],  "hand_right": [40, 4],   "tilt": 0,   "sway": 0,  "turn": 0 },
+        { "t": 1.2, "hand_left": [14, -12], "hand_right": [40, 4],   "tilt": 12,  "sway": 4,  "turn": 0.4 },
+        { "t": 1.6, "hand_left": [14, -12], "hand_right": [40, 4],   "tilt": 12,  "sway": 4,  "turn": 0.4 },
+        { "t": 1.8, "hand_left": [40, 4],   "hand_right": [44, 34],  "tilt": 0,   "sway": 0,  "turn": 0 },
+        { "t": 2.2, "hand_left": [40, 4],   "hand_right": [44, 34],  "tilt": 0,   "sway": 0,  "turn": 0 }
+      ]
+    }
+  },
+  "do": [
+    { "say": ["Initiating dance protocol.", "Beep. Boop. Groove."], "seconds": 2 },
+    { "move": "robot" },
+    { "say": ["Nailed it. I was born for that one.", "That wasn't acting."] }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "Disco",
+  "when": { "random": 0.6 },
+  "moves": {
+    "point": {
+      "length": 1.0, "repeat": 6, "face": "happy", "effect": "sparkles",
+      "keys": [
+        { "t": 0.0, "hand_right": [50, 42], "hand_left": [14, -6], "roll": -9, "tilt": 10, "sway": 5,
+          "squat": 0.0, "foot_right": [6, 0], "foot_left": [0, 0] },
+        { "t": 0.5, "hand_right": [-10, -6], "hand_left": [14, -6], "roll": 5, "tilt": -6, "sway": -5,
+          "squat": 0.5, "foot_right": [2, 0], "foot_left": [-2, 6] }
+      ]
+    }
+  },
+  "do": [
+    { "move": "point" },
+    { "turn_around": true },
+    { "move": "point" },
+    { "jump": true },
+    { "mood": "excited", "seconds": 2 }
+  ]
+}
