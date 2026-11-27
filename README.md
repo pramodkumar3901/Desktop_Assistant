@@ -4,9 +4,10 @@ A tiny, over-eager AI robot that walks along the bottom of your screen: a 3D
 screen-faced robot with glowing eyes, in the spirit of the animated office
 assistants of the 90s. It wants very badly to help and almost never does.
 
-![Blip walking with its music player, cheering you on, getting heart eyes, typing a
-draft rewrite on its laptop, then splitting off a mini Blip for a second Claude Code
-session that reports back and merges in](docs/blip-demo.gif)
+![Blip walking in through a door, strolling side-on, moonwalking, gliding and
+parachuting down after being thrown, a mini Blip walking in for a second Claude Code
+session and out again when it's done, a compact suggestion card, then Blip leaving
+through a door](docs/blip-demo.gif)
 
 **Start and stop:** double-click **`Start Blip.cmd`** (or `blip.pyw`). Blip walks in through a
 door that opens in a bottom corner of the screen. Right-click Blip and choose **Bye, Blip
