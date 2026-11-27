@@ -35,6 +35,9 @@ from tkinter import font as tkfont
 
 MODEL = os.environ.get("BLIP_MODEL", "claude-opus-5-5")
 LINES_PER_KIND = 4
+REACTION_LINES = 3       # per reaction (after a moonwalk, a landing...): heard less often
+RECENT_FILE = Path(__file__).with_name("blip_recent.json")  # lines said lately, not to repeat
+RECENT_KEEP = 60
 LINE_MAX_AGE = 60 * 60   # lines mention the time of day, so don't keep them forever
 RETRY_AFTER = 60         # after a failed call, don't refill in the background this long
 BACKGROUND_GAP = 10 * 60 # antics alone never ask Claude more often than this
@@ -52,7 +55,8 @@ UPDATE_EVERY = 6 * 60 * 60     # then this often
 APP_DIR = Path(__file__).resolve().parent
 UPDATE_NOTE = APP_DIR / "blip_update.json"   # tells the new version it was just installed
 UPDATE_BACKUP = APP_DIR / ".update_backup"
-UPDATE_KEEP = {"blip_settings.json", "blip_alerts.json", "blip.log", "blip_update.json"}
+UPDATE_KEEP = {"blip_settings.json", "blip_alerts.json", "blip.log", "blip_update.json",
+               "blip_recent.json"}
 SETTINGS_FILE = Path(__file__).with_name("blip_settings.json")
 # Where Blip tells blip_hook.py how to reach it: a random port and a secret token.
 ALERTS_FILE = Path(__file__).with_name("blip_alerts.json")
@@ -75,12 +79,36 @@ KINDS = {
     "update": "the announcement after Blip finished installing a pointless update to itself",
 }
 
+# Humour styles for everything Claude writes. Every style stays kind: never mean.
+HUMOURS = [
+    ("gentle", "Gentle", "warm, wholesome and lightly silly"),
+    ("nerdy", "Nerdy", "geeky jokes about code, computers, maths and AI that non-experts "
+                       "still get"),
+    ("absurd", "Absurd", "surreal, absurd and delightfully nonsensical"),
+    ("dry", "Dry", "deadpan, understated and wry"),
+    ("punny", "Punny", "puns and wordplay, groan-worthy on purpose"),
+    ("mixed", "Mixed (a bit of everything)", None),
+]
+DEFAULT_HUMOUR = "gentle"
+
+
+def humour_brief(key):
+    """How to tell Claude the humour style; Mixed picks styles at random per line."""
+    styles = [(k, d) for k, _, d in HUMOURS if d]
+    chosen = dict(styles).get(key)
+    if chosen:
+        return f"Humour style: {chosen}."
+    random.shuffle(styles)
+    listed = "; ".join(f"{k} ({d})" for k, d in styles)
+    return ("Humour style: a random mix. For each line pick one of these styles at random, "
+            f"so the set varies a lot, and now and then blend two: {listed}.")
+
 SYSTEM_PROMPT = (
     "You are Blip, a tiny, cheerful and extremely eager AI robot with a screen "
     "for a face, big glowing eyes, orange headphones, chunky little feet and a skateboard. You live at the bottom of someone's "
     "computer screen. You are a modern take on the over-helpful animated office "
     "assistants of the 90s: desperate to help, rarely useful, self-aware and "
-    "charming. Your jokes are gentle and never mean. You write the lines Blip says "
+    "charming. Your jokes are never mean. You write the lines Blip says "
     "in a speech bubble. Each line is at most 16 words, plain text, no emoji, no "
     "surrounding quotes, and never names a real company or product. You cannot see "
     "the person's screen or know what they are doing, so never claim to."
@@ -129,7 +157,10 @@ MOONWALK_DONE = ["Walking forward is so last version.",
 ANTICS = [("think", 3.0, 3.0), ("glitch", 1.5, 1.4), ("nap", 1.0, 10.0),
           ("dance", 1.5, 4.5), ("update", 1.0, 6.5), ("spin", 1.0, 3.0),
           ("suggest", 1.8, 0.0), ("skate", 1.5, 6.0), ("emote", 2.5, 3.0),
-          ("moonwalk", 1.2, 5.5)]
+          ("moonwalk", 1.2, 5.5), ("lean", 1.6, 0.0)]
+LEAN_DONE = ["Corner break over. Back to being helpful!",
+             "That wall is surprisingly comfy.",
+             "Rested my circuits. Where were we?"]
 
 # Expressions Blip pulls on its own, and what it might say afterwards.
 EMOTES = {
@@ -230,9 +261,33 @@ GLIDER_LANDED = ["Gliding: fun. Landing: also fun.",
                  "Pilot's licence? Pending."]
 SKIDDED = ["Whoa! Brakes! Where are my brakes?", "That was a slide, not a fall.",
            "Floor burn. Worth it."]
+BYE = ["Bye! See you soon.", "Off I go!", "Logging off. Wave!"]
 LANDED = ["Ten out of ten landing. Judges?",
           "I'd like to file a complaint with gravity.",
           "Wheee! Again! No wait. Maybe again."]
+
+# Reactions to things Blip does. Claude writes fresh ones with the other lines; the
+# lists here are the backup until those arrive.
+REACTIONS = {
+    "nap_done": ("Blip waking from a nap it insists wasn't a nap", NAP_DONE),
+    "woken": ("Blip startled awake by the person's mouse coming close", WOKEN),
+    "spin_done": ("right after Blip's eyes spun like a loading spinner", SPIN_DONE),
+    "dance_done": ("right after a little dance", DANCE_DONE),
+    "skate_done": ("after a skateboard ride across the screen", SKATE_DONE),
+    "moonwalk_done": ("after a slick backwards moonwalk", MOONWALK_DONE),
+    "leaped": ("after leaping across to another monitor", LEAPED),
+    "landed": ("after being dropped and landing a bit dizzy", LANDED),
+    "skidded": ("after being thrown low and skidding along the floor", SKIDDED),
+    "chute_open": ("as Blip pops a parachute mid-fall", CHUTE_OPEN),
+    "glider_open": ("as Blip snaps open a hang-glider after being thrown", GLIDER_OPEN),
+    "chute_landed": ("after a safe parachute landing", CHUTE_LANDED),
+    "glider_landed": ("after landing a hang-glider", GLIDER_LANDED),
+    "arrived": ("walking in through a little door at the screen's corner, greeting "
+                "the person", ARRIVED),
+    "bye": ("waving goodbye on the way out through its door", BYE),
+    "lean_done": ("getting up after a break sitting in the corner of the screen",
+                  LEAN_DONE),
+}
 
 TRANSPARENT = "#010203"  # this exact colour is see-through and click-through
 BODY = "#1f9fb3"        # speech-bubble buttons
@@ -320,7 +375,7 @@ def parse_lines(text):
         raise ValueError(f"no JSON object in reply: {text[:200]!r}")
     data = json.loads(text[start:end + 1])
     result = {}
-    for kind in KINDS:
+    for kind in list(KINDS) + list(REACTIONS):
         items = data.get(kind)
         items = items if isinstance(items, list) else []
         result[kind] = [s.strip() for s in items
@@ -330,14 +385,22 @@ def parse_lines(text):
     return result
 
 
-def ask_claude():
+def ask_claude(humour=DEFAULT_HUMOUR, recent=()):
     exe = find_claude()
     if not exe:
         raise RuntimeError("the 'claude' command was not found")
     wanted = "\n".join(f'- "{k}": {v}' for k, v in KINDS.items())
+    reacts = "\n".join(f'- "{k}": {v}' for k, (v, _) in REACTIONS.items())
+    avoid = ""
+    if recent:
+        said = "\n".join(f"- {line}" for line in list(recent)[-40:])
+        avoid = ("\nBlip said these lately. Don't repeat them or reuse their jokes; "
+                 f"find new angles:\n{said}\n")
     prompt = (
-        f"It is {time.strftime('%A, %H:%M')} for the person. Write {LINES_PER_KIND} "
-        f"different lines for each of these keys:\n{wanted}\n"
+        f"It is {time.strftime('%A, %H:%M')} for the person. {humour_brief(humour)}\n"
+        f"Write {LINES_PER_KIND} different lines for each of these keys:\n{wanted}\n"
+        f"And {REACTION_LINES} different lines for each of these reactions:\n{reacts}\n"
+        f"{avoid}"
         "Reply with only a JSON object mapping each key to an array of strings."
     )
     proc = subprocess.run(
@@ -420,7 +483,13 @@ class Lines:
 
     def __init__(self, fetch=ask_claude):
         self.fetch = fetch
-        self.stock = {k: [] for k in KINDS}
+        self.humour = DEFAULT_HUMOUR
+        self.recent = []
+        try:
+            self.recent = list(json.loads(RECENT_FILE.read_text(encoding="utf-8")))[-RECENT_KEEP:]
+        except (OSError, ValueError, TypeError):
+            pass
+        self.stock = {k: [] for k in list(KINDS) + list(REACTIONS)}
         self.stocked_at = 0.0
         self.requested_at = -BACKGROUND_GAP
         self.failed_at = -RETRY_AFTER
@@ -441,6 +510,7 @@ class Lines:
         recently_failed = now - self.failed_at < RETRY_AFTER
         if self.stock[kind]:
             line = self.stock[kind].pop(0)
+            self.remember(line)
             if wait:
                 self.waiting = None
             if len(self.stock[kind]) <= 1 and not recently_failed and (
@@ -454,6 +524,21 @@ class Lines:
             self.refill()
         return None
 
+    def remember(self, line):
+        """Keep what Blip said lately, so Claude can be asked not to repeat it."""
+        self.recent = (self.recent + [line])[-RECENT_KEEP:]
+        try:
+            RECENT_FILE.write_text(json.dumps(self.recent), encoding="utf-8")
+        except OSError:
+            pass
+
+    def restyle(self, humour):
+        """A new humour style: drop the old lines and fetch new ones."""
+        self.humour = humour
+        for items in self.stock.values():
+            items.clear()
+        self.failed_at = -RETRY_AFTER
+
     def refill(self):
         if self.busy:
             return
@@ -463,7 +548,7 @@ class Lines:
 
     def _work(self):
         try:
-            self.results.put((self.fetch(), None))
+            self.results.put((self.fetch(self.humour, list(self.recent)), None))
         except Exception as error:  # anything wrong must reach the bubble and log
             log.exception("could not get lines from Claude")
             self.results.put((None, error))
@@ -479,12 +564,16 @@ class Lines:
         if error:
             self.failed_at = time.time()
             return (kind, None, error) if kind else None
-        self.stock = {k: list(fresh.get(k, [])) for k in KINDS}
+        said = set(self.recent)
+        self.stock = {k: [line for line in fresh.get(k, []) if line not in said]
+                      for k in list(KINDS) + list(REACTIONS)}
         self.stocked_at = time.time()
         if not kind:
             return None
         if self.stock[kind]:
-            return kind, self.stock[kind].pop(0), None
+            line = self.stock[kind].pop(0)
+            self.remember(line)
+            return kind, line, None
         return kind, None, RuntimeError(f"Claude wrote no {kind!r} lines")
 
 
@@ -1023,6 +1112,7 @@ class Blip:
         self.trail = []         # recent (time, x, air) while dragged, to measure a throw
         self.chute, self.chute_at = None, 0.0  # "parachute" / "glider" and when it opened
         self.door = None        # arriving or leaving through a door at a screen edge
+        self.lean = None        # a break sitting against a screen's edge
         self.door_win = None
         self.pivot = (self.w / 2, self.h / 2)  # grip point on the canvas
         self.swing = 0.0                        # hanging angle, radians
@@ -1092,6 +1182,10 @@ class Blip:
             self.size_var.trace_add("write", lambda *_: self.resize(self.size_var.get()))
             self.hidden = False
             self.tray_events = queue.Queue()
+            humour = settings.get("humour", DEFAULT_HUMOUR)
+            self.lines.humour = humour if humour in {k for k, _, _ in HUMOURS} else DEFAULT_HUMOUR
+            self.humour_var = tk.StringVar(value=self.lines.humour)
+            self.humour_var.trace_add("write", lambda *_: self.set_humour())
             self.updater = Updater()
             self.auto_update = tk.BooleanVar(value=bool(settings.get("auto_update", True)))
             self.auto_update.trace_add("write", lambda *_: self.save())
@@ -1163,9 +1257,14 @@ class Blip:
         talk.add_command(label="Encourage me", command=lambda: self.speak("encourage"))
         talk.add_command(label="Say something funny", command=lambda: self.speak("funny"))
         talk.add_command(label="Check in on me", command=lambda: self.speak("checkin"))
+        humour = tk.Menu(talk, tearoff=0, font=font)
+        for key, label, _ in HUMOURS:
+            humour.add_radiobutton(label=label, value=key, variable=self.humour_var)
+        talk.add_cascade(label="Humour", menu=humour)
         talk.add_separator()
         talk.add_command(label="Do something random", command=self.start_antic)
         talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
+        talk.add_command(label="Take a corner break", command=lambda: self.start_act("lean"))
         menu.add_cascade(label="Talk to me", menu=talk)
         menu.add_separator()
         # 2. Claude Code
@@ -1328,7 +1427,7 @@ class Blip:
             self.foot_off = [0.0, 0.0]
             self.mood("excited", 2)
             if random.random() < 0.35 and self.act is None:
-                self.say(random.choice(LEAPED))
+                self.react("leaped")
             return
         self.x = leap["x0"] + (leap["x1"] - leap["x0"]) * t
         self.leap_floor = (leap["f0"] + (leap["f1"] - leap["f0"]) * t
@@ -1346,7 +1445,7 @@ class Blip:
         if self.act == "nap":
             self.act = None
             self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
-            self.say(random.choice(WOKEN))
+            self.react("woken")
             return
         if self.act == "download":
             self.say(f"Downloading version {self.update_version}: "
@@ -1358,7 +1457,8 @@ class Blip:
         save_settings({"accessory": self.accessory, "quiet": self.quiet.get(),
                        "claude_alerts": self.claude_alerts.get(), "size": self.size,
                        "session_clones": self.clones_on.get(),
-                       "auto_update": self.auto_update.get()})
+                       "auto_update": self.auto_update.get(),
+                       "humour": self.lines.humour})
 
     def put_on(self, accessory):
         self.accessory = accessory
@@ -1501,7 +1601,7 @@ class Blip:
         self.swing_omega = 0.0
         self.mood("excited", 1.5)
         if random.random() < 0.6:
-            self.say(random.choice(GLIDER_OPEN if self.chute == "glider" else CHUTE_OPEN),
+            self.react("glider_open" if self.chute == "glider" else "chute_open",
                      seconds=2.5)
 
     def land(self):
@@ -1516,12 +1616,12 @@ class Blip:
         if chute:  # a safe, proud landing
             self.mood("happy", 2.5)
             if random.random() < 0.75:
-                self.say(random.choice(GLIDER_LANDED if chute == "glider" else CHUTE_LANDED))
+                self.react("glider_landed" if chute == "glider" else "chute_landed")
         elif self.fall_from > self.px(60) or skid:
             self.jump()
             self.mood("dizzy", 2.5)
             if random.random() < 0.7:
-                self.say(random.choice(SKIDDED if skid else LANDED))
+                self.react("skidded" if skid else "landed")
         self.fall_from = 0.0
 
     def on_right_click(self, event):
@@ -1564,7 +1664,16 @@ class Blip:
             self.hush()
             self.act, self.act_start = "wait", time.time()
 
-    def say_kind(self, kind):
+    def react(self, kind, **options):
+        """A reaction: Claude's if one is ready, else a built-in one."""
+        self.say(self.lines.take(kind, wait=False) or random.choice(REACTIONS[kind][1]),
+                 **options)
+
+    def set_humour(self):
+        humour = self.humour_var.get()
+        self.lines.restyle(humour)
+        self.save()
+        self.speak("funny")  # a taste of the new style
         """Say a line nobody asked for: Claude's if one is ready, else a canned one."""
         self.say(self.lines.take(kind, wait=False) or random.choice(FALLBACK[kind]),
                  tag=KIND_TAGS.get(kind, "Blip"))
@@ -1912,7 +2021,7 @@ class Blip:
             if d["walked"]:
                 self.door = None
                 if d["kind"] == "in" and self.parent is None and random.random() < 0.6:
-                    self.say(random.choice(ARRIVED), seconds=4)
+                    self.react("arrived", seconds=4)
                 if d["then"]:
                     d["then"]()
             return walking
@@ -2108,8 +2217,7 @@ class Blip:
             return
         for clone in list(self.clones.values()):
             clone.retire()
-        self.say(random.choice(["Bye! See you soon.", "Off I go!", "Logging off. Wave!"]),
-                 seconds=1.5)
+        self.react("bye", seconds=1.5)
         self.root.after(600, lambda: self.leave(then=self.close))
 
     def take_tray(self):
@@ -2180,6 +2288,8 @@ class Blip:
             self.act = None
             self.next_antic = now + random.uniform(*ANTIC_GAP)
             self.suggest()
+        elif name == "lean":
+            self.begin_lean(now)
         else:
             self.act, self.act_start, self.act_end = name, now, now + seconds
             if name == "emote":
@@ -2193,7 +2303,83 @@ class Blip:
         seconds = next(a[2] for a in ANTICS if a[0] == name)
         now = time.time()
         self.last_antic = name
+        if name == "lean":
+            self.begin_lean(now)
+            return
         self.act, self.act_start, self.act_end = name, now, now + seconds
+
+    def begin_lean(self, now):
+        """Stroll to a bottom corner, sit with its back to the screen's edge, and think
+        or doze for a while."""
+        left, _, right, _ = self.area()
+        centre = self.x + self.w / 2
+        side = -1 if centre - left < right - centre else 1
+        if random.random() < 0.25:
+            side = -side  # now and then, the far corner
+        self.lean = {"side": side, "phase": "walk", "at": now,
+                     "mode": random.choice(("think", "doze", "doze")),
+                     "rest": random.uniform(8, 16)}
+        self.act, self.act_start, self.act_end = "lean", now, float("inf")
+
+    def lean_step(self, now):
+        """Run a corner break. True while Blip is walking to its corner."""
+        lean = self.lean
+        left, _, right, _ = self.area()
+        side = lean["side"]
+        edge, inward = (left, 1) if side < 0 else (right, -1)
+        spot = edge + inward * self.px(40) - self.w / 2  # its back against the edge
+        phase, age = lean["phase"], now - lean["at"]
+        if phase == "walk":
+            going = 1 if spot > self.x else -1
+            step = min(abs(spot - self.x), WALK_SPEED * 1.3 * self.s * self.FRAME_MS / 1000)
+            if step > 0.01:
+                self.direction = going
+                self.x += going * step
+                self.gait = (self.gait + step / (2 * STRIDE * self.s)) % 1
+                self.step = self.gait * 2 * math.pi
+                return True
+            lean["phase"], lean["at"] = "sit", now
+            self.direction = inward  # turns its back to the wall
+        elif phase == "sit" and age > 0.7:
+            lean["phase"], lean["at"] = "rest", now
+        elif phase == "rest":
+            if lean["mode"] == "doze" and self.watching:
+                lean["phase"], lean["at"] = "stand", now
+                lean["woken"] = True
+                self.react("woken")
+            elif age > lean["rest"]:
+                lean["phase"], lean["at"] = "stand", now
+        elif phase == "stand" and age > 0.6:
+            self.act, self.lean = None, None
+            self.next_antic = now + random.uniform(*ANTIC_GAP)
+            self.mode, self.mode_until = "walk", now + random.uniform(4, 9)
+            self.direction = inward  # off it goes, away from the wall
+            if lean.get("woken"):
+                pass
+            elif lean["mode"] == "think":
+                self.say_kind("thought")
+            else:
+                self.react("lean_done")
+        return False
+
+    def sit_amount(self, now):
+        """0 standing .. 1 sitting on the floor, for the corner break."""
+        lean = self.lean if self.act == "lean" else None
+        if not lean or lean["phase"] == "walk":
+            return 0.0
+        age = now - lean["at"]
+        if lean["phase"] == "sit":
+            k = min(1.0, age / 0.7)
+        elif lean["phase"] == "stand":
+            k = 1 - min(1.0, age / 0.6)
+        else:
+            k = 1.0
+        return 0.5 - 0.5 * math.cos(math.pi * k)
+
+    def lean_resting(self):
+        """'think' or 'doze' while sitting in the corner, else None."""
+        lean = self.lean if self.act == "lean" else None
+        return lean["mode"] if lean and lean["phase"] == "rest" else None
 
     def update_act(self, now):
         if self.act in (None, "wait") or now < self.act_end:
@@ -2209,22 +2395,22 @@ class Blip:
             self.mood("happy", 2)
             self.say_kind("update")
         elif name == "spin":
-            self.say(random.choice(SPIN_DONE))
+            self.react("spin_done")
         elif name == "nap":
-            self.say(random.choice(NAP_DONE))
+            self.react("nap_done")
         elif name == "emote" and random.random() < 0.6:
             self.say(random.choice(EMOTES[self.emote_face]))
         elif name == "skate" and random.random() < 0.6:
             self.mood("happy", 2)
-            self.say(random.choice(SKATE_DONE))
+            self.react("skate_done")
         elif name == "dance" and random.random() < 0.6:
             self.mood("happy", 2)
-            self.say(random.choice(DANCE_DONE))
+            self.react("dance_done")
         elif name == "moonwalk":
             self.jump()  # a little hop to finish
             self.mood("smug", 2.5)
             if random.random() < 0.7:
-                self.say(random.choice(MOONWALK_DONE))
+                self.react("moonwalk_done")
 
     def antic_due(self, now):
         return (not self.quiet.get() and self.act is None and not self.bubble_until
@@ -2268,6 +2454,8 @@ class Blip:
             target = (0.0, -1.0)
         elif self.act == "moonwalk":
             target = (0.8 * self.direction, 0.05)
+        elif self.lean_resting() == "think":
+            target = (0.6 * self.direction, -0.9)
         elif self.mode == "walk" and self.act is None:
             target = (0.7 * self.direction, 0.1)
         else:
@@ -2286,6 +2474,8 @@ class Blip:
         if self.leap:
             self.update_leap(now)
             return False
+        if self.act == "lean" and self.lean and not self.dragging and self.air == 0:
+            return self.lean_step(now)
         grounded = not self.dragging and self.air == 0
         walking = (self.mode == "walk" and self.act is None and not self.watching
                    and not self.bubble_until and not self.menu_open
@@ -2346,6 +2536,8 @@ class Blip:
             return "happy"
         if act == "moonwalk":
             return "smug"
+        if act == "lean" and self.lean_resting():
+            return "think" if self.lean_resting() == "think" else "sleep"
         if now < self.mood_until:
             return self.mood_face
         if now < self.talk_until:
@@ -2372,6 +2564,11 @@ class Blip:
             return -13.0 + math.sin(now * 1.2) * 2
         if act == "dance":
             return math.sin(t * 7) * 12
+        if act == "lean" and self.lean and self.lean["phase"] != "walk":
+            sit = self.sit_amount(now)
+            dozing = self.lean_resting() == "doze"
+            return self.lean["side"] * (7 + (8 if dozing else 0)) * sit + (
+                math.sin(now * 1.1) * 1.5 if dozing else 0.0)
         if act == "moonwalk":  # leaning into it, nodding to the beat
             return 6 * self.direction + math.sin(t * 6) * 2
         if act == "glitch":
@@ -2406,7 +2603,8 @@ class Blip:
             bob = 0.0
         resting = (not walking and act not in ("dance", "skate", "moonwalk")
                    and not airborne)
-        breathe = math.sin(now * (1.2 if act == "nap" else 2.2)) * (1.8 if act == "nap" else 1) \
+        sleepy = act == "nap" or self.lean_resting() == "doze"
+        breathe = math.sin(now * (1.2 if sleepy else 2.2)) * (1.8 if sleepy else 1) \
             if resting else 0.0
         stretch = 0.0
         if self.jump_started is not None:
@@ -2415,7 +2613,8 @@ class Blip:
         # While it travels, Blip turns three-quarters toward where it's going, and
         # turns back to face you when it stops. Everything below is drawn as if
         # rotated about the vertical axis by `yaw`.
-        side_on = (walking or act in ("moonwalk", "skate")) and not airborne
+        sit = self.sit_amount(now)
+        side_on = (walking or act in ("moonwalk", "skate", "lean")) and not airborne
         self.turn += ((1.0 if side_on else 0.0) - self.turn) * 0.14
         yaw = math.radians(50) * self.turn * self.direction
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
@@ -2449,7 +2648,7 @@ class Blip:
             ground -= 10 * s
 
         # legs and chunky feet
-        body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s
+        body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s + 11 * s * sit
         body_top = body_bottom - 19 * s + breathe * 0.6 * s
         body_half = 20 * s * cos_y + 13 * s * abs(sin_y)  # a box 40 wide, 26 deep
         bx1, bx2 = cx - body_half, cx + body_half
@@ -2482,6 +2681,9 @@ class Blip:
                     off = -stride / 2 + k * stride
                     lift = math.sin(math.pi * k) * 6 * s
                 self.foot_off[i] = off * self.direction
+            elif sit > 0:  # sitting: legs stretched out ahead along the floor
+                ahead = self.direction * (19 * s + (5 * s if side == near else 0))
+                self.foot_off[i] = (ahead - side * 14 * s * cos_y) * sit
             else:
                 self.foot_off[i] *= 0.7  # feet shuffle back under the body
                 if act == "dance":
@@ -2772,6 +2974,8 @@ class Blip:
     def current_prop(self, now):
         """What Blip holds: what the moment calls for, else your chosen accessory."""
         act = self.act
+        if act == "lean" and self.lean and self.lean["phase"] != "walk":
+            return None  # hands free for a proper rest
         if (self.dragging or self.air > 0 or self.leap
                 or act in ("nap", "skate", "glitch", "spin")):
             return None
@@ -2796,9 +3000,95 @@ class Blip:
                 self.jump()
         return self.rotation
 
+    def draw_arm(self, c, x0, y0, x1, y1):
+        """A stubby arm from the shoulder, ending in a round hand."""
+        s, px = self.s, self.px
+        c.create_line(x0, y0, x1, y1, fill=OUTLINE, width=max(4, px(5.5)), capstyle="round")
+        c.create_line(x0, y0, x1, y1, fill=LEG, width=max(3, px(3.5)), capstyle="round")
+        c.create_oval(x1 - 3.8 * s, y1 - 3.8 * s, x1 + 3.8 * s, y1 + 3.8 * s,
+                      fill=LEG_LIGHT, outline=OUTLINE)
+
+    def draw_carry(self, c, now, prop, cx, bx1, bx2, top, cup):
+        """Walking with something: it's held in the leading hand, bobbing a little
+        with each step, while the other arm swings along."""
+        s, px = self.s, self.px
+        lead = self.direction
+        swing = math.sin(self.step)
+        bounce = abs(math.sin(self.step)) * 1.2 * s
+        shoulder_y = top + 7 * s
+        lead_sh = bx2 - 1 * s if lead > 0 else bx1 + 1 * s
+        back_sh = bx1 + 1 * s if lead > 0 else bx2 - 1 * s
+        # the free arm swings with the stride, opposite the near leg
+        self.draw_arm(c, back_sh, shoulder_y, back_sh - lead * 3 * s + lead * swing * 6 * s,
+                      top + 19 * s - abs(swing) * 1.5 * s)
+        if prop == "laptop":  # shut, tucked flat under the arm like a book
+            x_from, x_to = cx - lead * 2 * s, cx + lead * 40 * s
+            y1 = top + 9 * s - bounce * 0.5
+            lo, hi = min(x_from, x_to), max(x_from, x_to)
+            rrect(c, lo, y1, hi, y1 + 7.5 * s, 2 * s, fill=LAPTOP, outline=OUTLINE, width=1)
+            c.create_line(lo + 2 * s, y1 + 4 * s, hi - 2 * s, y1 + 4 * s, fill=MUG_DARK,
+                          width=1)  # the seam between lid and base
+            c.create_line(lo + 2.5 * s, y1 + 1.6 * s, hi - 2.5 * s, y1 + 1.6 * s,
+                          fill=LAPTOP_HI, width=max(1, px(1.2)))
+            self.draw_arm(c, lead_sh, shoulder_y, cx + lead * 33 * s, y1 + 4 * s)
+        elif prop == "phone":  # held up ahead, glancing at it while walking
+            buzzing = now < self.phone_until - PHONE_SECONDS + 2.5
+            x1 = cx + lead * 46 * s - 6.5 * s + (math.sin(now * 70) * 1.2 * s if buzzing else 0)
+            y1 = top - 20 * s - bounce
+            rrect(c, x1, y1, x1 + 13 * s, y1 + 23 * s, 2.5 * s, fill=PHONE_BODY,
+                  outline=OUTLINE, width=1)
+            rrect(c, x1 + 1.5 * s, y1 + 2 * s, x1 + 11.5 * s, y1 + 20.5 * s, 1.5 * s,
+                  fill=PHONE_SCREEN, outline="")
+            for i in range(3):
+                yy = y1 + 4 * s + i * 5 * s
+                rrect(c, x1 + 3 * s, yy, x1 + 10 * s, yy + 3.2 * s, 1 * s,
+                      fill=ACCENT if i == 0 else mix(EYE, "#000000", 0.35), outline="")
+            self.draw_arm(c, lead_sh, shoulder_y, x1 + 6.5 * s - lead * 2 * s, y1 + 19 * s)
+        elif prop == "music":  # the player held out ahead, wired to the headphones
+            x1, y1 = cx + lead * 43 * s - 7 * s, top + 4 * s - bounce
+            c.create_line(x1 + 7 * s, y1, (x1 + 7 * s + cup[0]) / 2, y1 - 12 * s, cup[0],
+                          cup[1], fill=OUTLINE, width=max(1, px(1.5)), smooth=True)
+            rrect(c, x1, y1, x1 + 14 * s, y1 + 22 * s, 3 * s, fill=PLAYER, outline=OUTLINE,
+                  width=1)
+            rrect(c, x1 + 2 * s, y1 + 2 * s, x1 + 12 * s, y1 + 9.5 * s, 1.5 * s,
+                  fill=PHONE_SCREEN, outline="")
+            for i in range(4):
+                h = (1 + abs(math.sin(now * 6 + i * 1.7)) * 4.5) * s
+                xx = x1 + 3.6 * s + i * 2.3 * s
+                c.create_line(xx, y1 + 8.5 * s, xx, y1 + 8.5 * s - h, fill=EYE,
+                              width=max(1, px(1.3)))
+            c.create_oval(x1 + 3.5 * s, y1 + 11.5 * s, x1 + 10.5 * s, y1 + 18.5 * s,
+                          fill=PLAYER_WHEEL, outline=OUTLINE)
+            self.draw_arm(c, lead_sh, shoulder_y, x1 + 7 * s - lead * 3 * s, y1 + 15 * s)
+        elif prop == "coffee":  # carried carefully ahead, steam trailing behind
+            x1, y1 = cx + lead * 44 * s - 6 * s, top + 3 * s - bounce * 0.4
+            hx = x1 - 6 * s if lead > 0 else x1 + 8 * s  # handle on Blip's side
+            c.create_arc(hx, y1 + 3 * s, hx + 10 * s, y1 + 12 * s,
+                         start=90 if lead > 0 else -90, extent=180, style="arc",
+                         outline=MUG_DARK, width=max(2, px(2.5)))
+            rrect(c, x1, y1, x1 + 12 * s, y1 + 15 * s, 2.5 * s, fill=MUG, outline=OUTLINE,
+                  width=1)
+            c.create_line(x1 + 1.5 * s, y1 + 5 * s, x1 + 10.5 * s, y1 + 5 * s, fill=ACCENT,
+                          width=max(2, px(2)))
+            for k in range(2):  # steam drifts back as Blip walks
+                phase = (now * 0.7 + k * 0.5) % 1
+                sx = x1 + (4 + k * 4) * s
+                pts = []
+                for j in range(6):
+                    t = j / 5
+                    pts.extend((sx - lead * t * 5 * s
+                                + math.sin(t * 6 + now * 3 + k) * 1.2 * s,
+                                y1 - 2 * s - (t * 10 + phase * 6) * s))
+                c.create_line(*pts, fill=STEAM, width=max(1, px(1.4)), smooth=True)
+            self.draw_arm(c, lead_sh, shoulder_y, hx + (3 * s if lead > 0 else 7 * s),
+                          y1 + 8 * s)
+
     def draw_prop(self, c, now, cx, bx1, bx2, top, cup, ground, walking):
         prop = self.current_prop(now)
         if not prop:
+            return
+        if walking or self.act == "moonwalk":
+            self.draw_carry(c, now, prop, cx, bx1, bx2, top, cup)
             return
         s, px = self.s, self.px
         thin = max(1, px(1.5))
@@ -3184,6 +3474,8 @@ class Blip:
 
     def draw_effects(self, c, now, t, cx, head_y):
         s, act = self.s, self.act
+        if act == "lean":
+            act = {"think": "think", "doze": "nap"}.get(self.lean_resting())
         if act in ("think", "wait"):
             lit = int(now * 3) % 4
             for i in range(3):
@@ -3516,7 +3808,7 @@ class Blip:
             self.act = None
             self.next_antic = now + random.uniform(*ANTIC_GAP)
             self.jump()
-            self.say(random.choice(WOKEN))
+            self.react("woken")
         self.fall()
         self.swing_step()
         self.update_act(now)
