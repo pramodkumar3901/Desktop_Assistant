@@ -35,6 +35,9 @@ from tkinter import font as tkfont
 
 MODEL = os.environ.get("BLIP_MODEL", "claude-opus-5-5")
 LINES_PER_KIND = 4
+REACTION_LINES = 3       # per reaction (after a moonwalk, a landing...): heard less often
+RECENT_FILE = Path(__file__).with_name("blip_recent.json")  # lines said lately, not to repeat
+RECENT_KEEP = 60
 LINE_MAX_AGE = 60 * 60   # lines mention the time of day, so don't keep them forever
 RETRY_AFTER = 60         # after a failed call, don't refill in the background this long
 BACKGROUND_GAP = 10 * 60 # antics alone never ask Claude more often than this
@@ -52,7 +55,8 @@ UPDATE_EVERY = 6 * 60 * 60     # then this often
 APP_DIR = Path(__file__).resolve().parent
 UPDATE_NOTE = APP_DIR / "blip_update.json"   # tells the new version it was just installed
 UPDATE_BACKUP = APP_DIR / ".update_backup"
-UPDATE_KEEP = {"blip_settings.json", "blip_alerts.json", "blip.log", "blip_update.json"}
+UPDATE_KEEP = {"blip_settings.json", "blip_alerts.json", "blip.log", "blip_update.json",
+               "blip_recent.json"}
 SETTINGS_FILE = Path(__file__).with_name("blip_settings.json")
 # Where Blip tells blip_hook.py how to reach it: a random port and a secret token.
 ALERTS_FILE = Path(__file__).with_name("blip_alerts.json")
@@ -75,12 +79,36 @@ KINDS = {
     "update": "the announcement after Blip finished installing a pointless update to itself",
 }
 
+# Humour styles for everything Claude writes. Every style stays kind: never mean.
+HUMOURS = [
+    ("gentle", "Gentle", "warm, wholesome and lightly silly"),
+    ("nerdy", "Nerdy", "geeky jokes about code, computers, maths and AI that non-experts "
+                       "still get"),
+    ("absurd", "Absurd", "surreal, absurd and delightfully nonsensical"),
+    ("dry", "Dry", "deadpan, understated and wry"),
+    ("punny", "Punny", "puns and wordplay, groan-worthy on purpose"),
+    ("mixed", "Mixed (a bit of everything)", None),
+]
+DEFAULT_HUMOUR = "gentle"
+
+
+def humour_brief(key):
+    """How to tell Claude the humour style; Mixed picks styles at random per line."""
+    styles = [(k, d) for k, _, d in HUMOURS if d]
+    chosen = dict(styles).get(key)
+    if chosen:
+        return f"Humour style: {chosen}."
+    random.shuffle(styles)
+    listed = "; ".join(f"{k} ({d})" for k, d in styles)
+    return ("Humour style: a random mix. For each line pick one of these styles at random, "
+            f"so the set varies a lot, and now and then blend two: {listed}.")
+
 SYSTEM_PROMPT = (
     "You are Blip, a tiny, cheerful and extremely eager AI robot with a screen "
     "for a face, big glowing eyes, orange headphones, chunky little feet and a skateboard. You live at the bottom of someone's "
     "computer screen. You are a modern take on the over-helpful animated office "
     "assistants of the 90s: desperate to help, rarely useful, self-aware and "
-    "charming. Your jokes are gentle and never mean. You write the lines Blip says "
+    "charming. Your jokes are never mean. You write the lines Blip says "
     "in a speech bubble. Each line is at most 16 words, plain text, no emoji, no "
     "surrounding quotes, and never names a real company or product. You cannot see "
     "the person's screen or know what they are doing, so never claim to."
@@ -233,9 +261,33 @@ GLIDER_LANDED = ["Gliding: fun. Landing: also fun.",
                  "Pilot's licence? Pending."]
 SKIDDED = ["Whoa! Brakes! Where are my brakes?", "That was a slide, not a fall.",
            "Floor burn. Worth it."]
+BYE = ["Bye! See you soon.", "Off I go!", "Logging off. Wave!"]
 LANDED = ["Ten out of ten landing. Judges?",
           "I'd like to file a complaint with gravity.",
           "Wheee! Again! No wait. Maybe again."]
+
+# Reactions to things Blip does. Claude writes fresh ones with the other lines; the
+# lists here are the backup until those arrive.
+REACTIONS = {
+    "nap_done": ("Blip waking from a nap it insists wasn't a nap", NAP_DONE),
+    "woken": ("Blip startled awake by the person's mouse coming close", WOKEN),
+    "spin_done": ("right after Blip's eyes spun like a loading spinner", SPIN_DONE),
+    "dance_done": ("right after a little dance", DANCE_DONE),
+    "skate_done": ("after a skateboard ride across the screen", SKATE_DONE),
+    "moonwalk_done": ("after a slick backwards moonwalk", MOONWALK_DONE),
+    "leaped": ("after leaping across to another monitor", LEAPED),
+    "landed": ("after being dropped and landing a bit dizzy", LANDED),
+    "skidded": ("after being thrown low and skidding along the floor", SKIDDED),
+    "chute_open": ("as Blip pops a parachute mid-fall", CHUTE_OPEN),
+    "glider_open": ("as Blip snaps open a hang-glider after being thrown", GLIDER_OPEN),
+    "chute_landed": ("after a safe parachute landing", CHUTE_LANDED),
+    "glider_landed": ("after landing a hang-glider", GLIDER_LANDED),
+    "arrived": ("walking in through a little door at the screen's corner, greeting "
+                "the person", ARRIVED),
+    "bye": ("waving goodbye on the way out through its door", BYE),
+    "lean_done": ("getting up after a break sitting in the corner of the screen",
+                  LEAN_DONE),
+}
 
 TRANSPARENT = "#010203"  # this exact colour is see-through and click-through
 BODY = "#1f9fb3"        # speech-bubble buttons
@@ -323,7 +375,7 @@ def parse_lines(text):
         raise ValueError(f"no JSON object in reply: {text[:200]!r}")
     data = json.loads(text[start:end + 1])
     result = {}
-    for kind in KINDS:
+    for kind in list(KINDS) + list(REACTIONS):
         items = data.get(kind)
         items = items if isinstance(items, list) else []
         result[kind] = [s.strip() for s in items
@@ -333,14 +385,22 @@ def parse_lines(text):
     return result
 
 
-def ask_claude():
+def ask_claude(humour=DEFAULT_HUMOUR, recent=()):
     exe = find_claude()
     if not exe:
         raise RuntimeError("the 'claude' command was not found")
     wanted = "\n".join(f'- "{k}": {v}' for k, v in KINDS.items())
+    reacts = "\n".join(f'- "{k}": {v}' for k, (v, _) in REACTIONS.items())
+    avoid = ""
+    if recent:
+        said = "\n".join(f"- {line}" for line in list(recent)[-40:])
+        avoid = ("\nBlip said these lately. Don't repeat them or reuse their jokes; "
+                 f"find new angles:\n{said}\n")
     prompt = (
-        f"It is {time.strftime('%A, %H:%M')} for the person. Write {LINES_PER_KIND} "
-        f"different lines for each of these keys:\n{wanted}\n"
+        f"It is {time.strftime('%A, %H:%M')} for the person. {humour_brief(humour)}\n"
+        f"Write {LINES_PER_KIND} different lines for each of these keys:\n{wanted}\n"
+        f"And {REACTION_LINES} different lines for each of these reactions:\n{reacts}\n"
+        f"{avoid}"
         "Reply with only a JSON object mapping each key to an array of strings."
     )
     proc = subprocess.run(
@@ -423,7 +483,13 @@ class Lines:
 
     def __init__(self, fetch=ask_claude):
         self.fetch = fetch
-        self.stock = {k: [] for k in KINDS}
+        self.humour = DEFAULT_HUMOUR
+        self.recent = []
+        try:
+            self.recent = list(json.loads(RECENT_FILE.read_text(encoding="utf-8")))[-RECENT_KEEP:]
+        except (OSError, ValueError, TypeError):
+            pass
+        self.stock = {k: [] for k in list(KINDS) + list(REACTIONS)}
         self.stocked_at = 0.0
         self.requested_at = -BACKGROUND_GAP
         self.failed_at = -RETRY_AFTER
@@ -444,6 +510,7 @@ class Lines:
         recently_failed = now - self.failed_at < RETRY_AFTER
         if self.stock[kind]:
             line = self.stock[kind].pop(0)
+            self.remember(line)
             if wait:
                 self.waiting = None
             if len(self.stock[kind]) <= 1 and not recently_failed and (
@@ -457,6 +524,21 @@ class Lines:
             self.refill()
         return None
 
+    def remember(self, line):
+        """Keep what Blip said lately, so Claude can be asked not to repeat it."""
+        self.recent = (self.recent + [line])[-RECENT_KEEP:]
+        try:
+            RECENT_FILE.write_text(json.dumps(self.recent), encoding="utf-8")
+        except OSError:
+            pass
+
+    def restyle(self, humour):
+        """A new humour style: drop the old lines and fetch new ones."""
+        self.humour = humour
+        for items in self.stock.values():
+            items.clear()
+        self.failed_at = -RETRY_AFTER
+
     def refill(self):
         if self.busy:
             return
@@ -466,7 +548,7 @@ class Lines:
 
     def _work(self):
         try:
-            self.results.put((self.fetch(), None))
+            self.results.put((self.fetch(self.humour, list(self.recent)), None))
         except Exception as error:  # anything wrong must reach the bubble and log
             log.exception("could not get lines from Claude")
             self.results.put((None, error))
@@ -482,12 +564,16 @@ class Lines:
         if error:
             self.failed_at = time.time()
             return (kind, None, error) if kind else None
-        self.stock = {k: list(fresh.get(k, [])) for k in KINDS}
+        said = set(self.recent)
+        self.stock = {k: [line for line in fresh.get(k, []) if line not in said]
+                      for k in list(KINDS) + list(REACTIONS)}
         self.stocked_at = time.time()
         if not kind:
             return None
         if self.stock[kind]:
-            return kind, self.stock[kind].pop(0), None
+            line = self.stock[kind].pop(0)
+            self.remember(line)
+            return kind, line, None
         return kind, None, RuntimeError(f"Claude wrote no {kind!r} lines")
 
 
@@ -1096,6 +1182,10 @@ class Blip:
             self.size_var.trace_add("write", lambda *_: self.resize(self.size_var.get()))
             self.hidden = False
             self.tray_events = queue.Queue()
+            humour = settings.get("humour", DEFAULT_HUMOUR)
+            self.lines.humour = humour if humour in {k for k, _, _ in HUMOURS} else DEFAULT_HUMOUR
+            self.humour_var = tk.StringVar(value=self.lines.humour)
+            self.humour_var.trace_add("write", lambda *_: self.set_humour())
             self.updater = Updater()
             self.auto_update = tk.BooleanVar(value=bool(settings.get("auto_update", True)))
             self.auto_update.trace_add("write", lambda *_: self.save())
@@ -1167,6 +1257,10 @@ class Blip:
         talk.add_command(label="Encourage me", command=lambda: self.speak("encourage"))
         talk.add_command(label="Say something funny", command=lambda: self.speak("funny"))
         talk.add_command(label="Check in on me", command=lambda: self.speak("checkin"))
+        humour = tk.Menu(talk, tearoff=0, font=font)
+        for key, label, _ in HUMOURS:
+            humour.add_radiobutton(label=label, value=key, variable=self.humour_var)
+        talk.add_cascade(label="Humour", menu=humour)
         talk.add_separator()
         talk.add_command(label="Do something random", command=self.start_antic)
         talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
@@ -1333,7 +1427,7 @@ class Blip:
             self.foot_off = [0.0, 0.0]
             self.mood("excited", 2)
             if random.random() < 0.35 and self.act is None:
-                self.say(random.choice(LEAPED))
+                self.react("leaped")
             return
         self.x = leap["x0"] + (leap["x1"] - leap["x0"]) * t
         self.leap_floor = (leap["f0"] + (leap["f1"] - leap["f0"]) * t
@@ -1351,7 +1445,7 @@ class Blip:
         if self.act == "nap":
             self.act = None
             self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
-            self.say(random.choice(WOKEN))
+            self.react("woken")
             return
         if self.act == "download":
             self.say(f"Downloading version {self.update_version}: "
@@ -1363,7 +1457,8 @@ class Blip:
         save_settings({"accessory": self.accessory, "quiet": self.quiet.get(),
                        "claude_alerts": self.claude_alerts.get(), "size": self.size,
                        "session_clones": self.clones_on.get(),
-                       "auto_update": self.auto_update.get()})
+                       "auto_update": self.auto_update.get(),
+                       "humour": self.lines.humour})
 
     def put_on(self, accessory):
         self.accessory = accessory
@@ -1506,7 +1601,7 @@ class Blip:
         self.swing_omega = 0.0
         self.mood("excited", 1.5)
         if random.random() < 0.6:
-            self.say(random.choice(GLIDER_OPEN if self.chute == "glider" else CHUTE_OPEN),
+            self.react("glider_open" if self.chute == "glider" else "chute_open",
                      seconds=2.5)
 
     def land(self):
@@ -1521,12 +1616,12 @@ class Blip:
         if chute:  # a safe, proud landing
             self.mood("happy", 2.5)
             if random.random() < 0.75:
-                self.say(random.choice(GLIDER_LANDED if chute == "glider" else CHUTE_LANDED))
+                self.react("glider_landed" if chute == "glider" else "chute_landed")
         elif self.fall_from > self.px(60) or skid:
             self.jump()
             self.mood("dizzy", 2.5)
             if random.random() < 0.7:
-                self.say(random.choice(SKIDDED if skid else LANDED))
+                self.react("skidded" if skid else "landed")
         self.fall_from = 0.0
 
     def on_right_click(self, event):
@@ -1569,7 +1664,16 @@ class Blip:
             self.hush()
             self.act, self.act_start = "wait", time.time()
 
-    def say_kind(self, kind):
+    def react(self, kind, **options):
+        """A reaction: Claude's if one is ready, else a built-in one."""
+        self.say(self.lines.take(kind, wait=False) or random.choice(REACTIONS[kind][1]),
+                 **options)
+
+    def set_humour(self):
+        humour = self.humour_var.get()
+        self.lines.restyle(humour)
+        self.save()
+        self.speak("funny")  # a taste of the new style
         """Say a line nobody asked for: Claude's if one is ready, else a canned one."""
         self.say(self.lines.take(kind, wait=False) or random.choice(FALLBACK[kind]),
                  tag=KIND_TAGS.get(kind, "Blip"))
@@ -1917,7 +2021,7 @@ class Blip:
             if d["walked"]:
                 self.door = None
                 if d["kind"] == "in" and self.parent is None and random.random() < 0.6:
-                    self.say(random.choice(ARRIVED), seconds=4)
+                    self.react("arrived", seconds=4)
                 if d["then"]:
                     d["then"]()
             return walking
@@ -2113,8 +2217,7 @@ class Blip:
             return
         for clone in list(self.clones.values()):
             clone.retire()
-        self.say(random.choice(["Bye! See you soon.", "Off I go!", "Logging off. Wave!"]),
-                 seconds=1.5)
+        self.react("bye", seconds=1.5)
         self.root.after(600, lambda: self.leave(then=self.close))
 
     def take_tray(self):
@@ -2243,7 +2346,7 @@ class Blip:
             if lean["mode"] == "doze" and self.watching:
                 lean["phase"], lean["at"] = "stand", now
                 lean["woken"] = True
-                self.say(random.choice(WOKEN))
+                self.react("woken")
             elif age > lean["rest"]:
                 lean["phase"], lean["at"] = "stand", now
         elif phase == "stand" and age > 0.6:
@@ -2256,7 +2359,7 @@ class Blip:
             elif lean["mode"] == "think":
                 self.say_kind("thought")
             else:
-                self.say(random.choice(LEAN_DONE))
+                self.react("lean_done")
         return False
 
     def sit_amount(self, now):
@@ -2292,22 +2395,22 @@ class Blip:
             self.mood("happy", 2)
             self.say_kind("update")
         elif name == "spin":
-            self.say(random.choice(SPIN_DONE))
+            self.react("spin_done")
         elif name == "nap":
-            self.say(random.choice(NAP_DONE))
+            self.react("nap_done")
         elif name == "emote" and random.random() < 0.6:
             self.say(random.choice(EMOTES[self.emote_face]))
         elif name == "skate" and random.random() < 0.6:
             self.mood("happy", 2)
-            self.say(random.choice(SKATE_DONE))
+            self.react("skate_done")
         elif name == "dance" and random.random() < 0.6:
             self.mood("happy", 2)
-            self.say(random.choice(DANCE_DONE))
+            self.react("dance_done")
         elif name == "moonwalk":
             self.jump()  # a little hop to finish
             self.mood("smug", 2.5)
             if random.random() < 0.7:
-                self.say(random.choice(MOONWALK_DONE))
+                self.react("moonwalk_done")
 
     def antic_due(self, now):
         return (not self.quiet.get() and self.act is None and not self.bubble_until
@@ -3705,7 +3808,7 @@ class Blip:
             self.act = None
             self.next_antic = now + random.uniform(*ANTIC_GAP)
             self.jump()
-            self.say(random.choice(WOKEN))
+            self.react("woken")
         self.fall()
         self.swing_step()
         self.update_act(now)

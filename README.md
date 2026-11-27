@@ -43,7 +43,7 @@ The right-click menu, in three groups:
 | Menu | Holds |
 | --- | --- |
 | **Rewrite copied text** | Improve it, Make it shorter, More professional, Friendlier, Fix grammar only, Undo last rewrite |
-| **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random, Moonwalk for me, Take a corner break |
+| **Talk to me** | Encourage me, Say something funny, Check in on me, Humour, Do something random, Moonwalk for me, Take a corner break |
 | **Claude Code** | Connected to Claude Code, Show alerts, A mini Blip for each extra session, What can you do?, Send a test alert |
 | **Look** | Accessory (Rotate, Nothing, Laptop, Phone, Music player, Coffee mug) and Size (Tiny, the default; Medium; Large) |
 | **Updates** | The version, Update automatically, Check for updates now |
@@ -139,11 +139,18 @@ gh release create v1.1.0 --title "Blip 1.1.0" --notes "- What changed, first lin
 ## About the lines
 
 - Claude writes them, through `claude -p` with tools and customizations turned off.
-- One call fetches 4 lines of each kind (about 20 seconds).
+- One call fetches 4 lines of each kind, plus 3 for each reaction (after a moonwalk, a
+  parachute landing, waking up, walking in through the door...), in about 30–40 seconds.
+  Until they arrive, reactions use built-in lines.
+- **Humour** (right-click → **Talk to me → Humour**): Gentle (the default), Nerdy, Absurd,
+  Dry, Punny, or **Mixed**, which picks a style at random for each line and sometimes blends
+  two. Changing it fetches a fresh batch and tells you a joke in the new style.
+- Blip remembers the last 60 things it said (`blip_recent.json`) and asks Claude not to
+  repeat them or reuse their jokes, and drops any line that does.
 - A call happens at startup and when you ask for a line that has run out.
   Random antics only trigger one at most every 10 minutes; in between they
   fall back to built-in lines. These calls count against your Claude usage.
-- For these lines, the only thing sent about you is the day and time. Blip does not
+- For these lines, the only things sent are the day and time, the humour style and Blip's own recent lines. Blip does not
   read your screen or keyboard; it reads the clipboard only when you ask for a rewrite.
 - The model is `claude-opus-5-5`. Set the `BLIP_MODEL` environment variable to
   use another one.

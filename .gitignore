@@ -7,3 +7,4 @@ blip.log
 __pycache__/
 blip_update.json
 .update_backup/
+blip_recent.json
