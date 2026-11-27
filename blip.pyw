@@ -101,10 +101,16 @@ DANCE_DONE = ["Nobody trained me to dance. That was all me.",
               "Daily dance quota: met.",
               "That counts as exercise for feet this chunky."]
 
+MOONWALK_DONE = ["Walking forward is so last version.",
+                 "My feet went one way and I went the other. On purpose.",
+                 "Zero friction. All style.",
+                 "I've been practising that on the taskbar for weeks."]
+
 # name, weight, seconds
 ANTICS = [("think", 3.0, 3.0), ("glitch", 1.5, 1.4), ("nap", 1.0, 10.0),
           ("dance", 1.5, 4.5), ("update", 1.0, 6.5), ("spin", 1.0, 3.0),
-          ("suggest", 1.8, 0.0), ("skate", 1.5, 6.0), ("emote", 2.5, 3.0)]
+          ("suggest", 1.8, 0.0), ("skate", 1.5, 6.0), ("emote", 2.5, 3.0),
+          ("moonwalk", 1.2, 5.5)]
 
 # Expressions Blip pulls on its own, and what it might say afterwards.
 EMOTES = {
@@ -123,6 +129,12 @@ EMOTES = {
 STRIDE = 11        # step length while walking, in unscaled pixels
 WALK_SPEED = 45    # unscaled pixels per second
 SWING_LIMIT = 0.95  # how far (radians) Blip may swing while hanging
+MOONWALK_SPEED = 55  # unscaled pixels per second, gliding backwards
+GRAVITY = 2600       # unscaled pixels per second squared
+THROW_SPEED = 700    # let go faster than this (px/s) and Blip is thrown, not dropped
+THROW_MAX = 4200     # fastest throw, px/s
+DANGER_DROP = 300    # a fall from higher than this (px) calls for a parachute or glider
+GLIDE_SPEED = 420    # thrown sideways faster than this (px/s): a glider, else a parachute
 
 ACCESSORIES = [("rotate", "Rotate (surprise me)"), ("none", "Nothing"),
                ("laptop", "Laptop"), ("phone", "Phone"), ("music", "Music player"),
@@ -176,6 +188,16 @@ LEAPED = ["New screen! New me.",
 FINISHED = ["Claude finished in {project}! Come and see.",
             "Done! Claude wrapped up in {project}.",
             "Psst. {project} is ready for you."]
+CHUTE_OPEN = ["Parachute!", "Deploying safety protocols!", "Not today, gravity!"]
+GLIDER_OPEN = ["Glider out! Wheee!", "I am an aircraft now.", "Look, I can fly! Sort of."]
+CHUTE_LANDED = ["Safety first. Style second. Both achieved.",
+                "And that's why I always pack a parachute.",
+                "Smooth landing. Please return your seat to upright."]
+GLIDER_LANDED = ["Gliding: fun. Landing: also fun.",
+                 "Captain Blip, touching down.",
+                 "Pilot's licence? Pending."]
+SKIDDED = ["Whoa! Brakes! Where are my brakes?", "That was a slide, not a fall.",
+           "Floor burn. Worth it."]
 LANDED = ["Ten out of ten landing. Judges?",
           "I'd like to file a complaint with gravity.",
           "Wheee! Again! No wait. Maybe again."]
@@ -723,6 +745,9 @@ class Blip:
         self.air = 0.0          # height above the ground after being dropped
         self.fall_speed = 0.0
         self.fall_from = 0.0
+        self.vx = 0.0           # sideways speed after being thrown, px/s
+        self.trail = []         # recent (time, x, air) while dragged, to measure a throw
+        self.chute, self.chute_at = None, 0.0  # "parachute" / "glider" and when it opened
         self.pivot = (self.w / 2, self.h / 2)  # grip point on the canvas
         self.swing = 0.0                        # hanging angle, radians
         self.swing_omega = 0.0
@@ -839,6 +864,7 @@ class Blip:
         talk.add_command(label="Check in on me", command=lambda: self.speak("checkin"))
         talk.add_separator()
         talk.add_command(label="Do something random", command=self.start_antic)
+        talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
         self.menu.add_cascade(label="Talk to me", menu=talk)
         self.menu.add_separator()
         # 2. Claude Code
@@ -1042,6 +1068,7 @@ class Blip:
             if math.hypot(event.x_root - x0, event.y_root - y0) < self.px(6):
                 return  # still just a click
             self.dragging = True
+            self.chute, self.vx, self.trail = None, 0.0, []
             self.pivot = (off_x, off_y)
             self.drag_started = time.time()
             self.last_pivot_x, self.pivot_vx = None, 0.0
@@ -1064,30 +1091,123 @@ class Blip:
         self.air = max(0.0, min(bottom - self.h - (event.y_root - off_y),
                                 bottom - top - self.h))
         self.fall_speed, self.fall_from = 0.0, self.air
+        now = time.time()
+        self.trail.append((now, self.x, self.air))
+        self.trail = [p for p in self.trail if now - p[0] < 0.12]
 
     def on_release(self, event):
         dragged, self.press, self.dragging = self.dragging, None, False
         if not dragged:
             self.on_click(event)
+            return
+        # How fast was it moving when let go? Fast enough and it's a throw.
+        now = time.time()
+        trail = [p for p in self.trail if now - p[0] < 0.12]
+        self.trail = []
+        if len(trail) < 2 or trail[-1][0] - trail[0][0] < 0.01:
+            return
+        span = trail[-1][0] - trail[0][0]
+        vx = (trail[-1][1] - trail[0][1]) / span
+        vy = (trail[-1][2] - trail[0][2]) / span  # upward is positive
+        speed = math.hypot(vx, vy)
+        if speed < THROW_SPEED * self.s:
+            return  # just let go: it drops
+        k = min(1.0, THROW_MAX * self.s / speed)
+        self.vx, self.fall_speed = vx * k, -vy * k
+        if self.air <= 0 and self.fall_speed >= 0:
+            self.air = 1.0  # thrown along the floor: a skid, not a flight
+        self.fall_from = self.air
+        self.mood("excited", 1)
 
     def fall(self):
-        """Drop back to the ground after being let go, with a little bounce."""
+        """Fly and fall after being let go or thrown. A dangerous fall opens a
+        parachute (or a glider, if Blip is flying sideways fast) to land safely."""
         self.drag_lean *= 0.85
-        if self.dragging or self.air <= 0:
+        if self.dragging:
             return
-        dt = self.FRAME_MS / 1000
-        self.fall_speed += 2600 * self.s * dt
-        self.air -= self.fall_speed * dt
+        dt, s = self.FRAME_MS / 1000, self.s
         if self.air <= 0:
-            self.air, self.fall_speed = 0.0, 0.0
-            left, _, right, _ = self.area()
-            self.x = float(min(max(self.x, left), right - self.w))
-            if self.fall_from > self.px(60):
-                self.jump()
-                self.mood("dizzy", 2.5)
-                if random.random() < 0.7:
-                    self.say(random.choice(LANDED))
-            self.fall_from = 0.0
+            if self.vx:  # skidding along the floor after a low throw
+                self.x += self.vx * dt
+                self.vx *= 0.86
+                if abs(self.vx) < 20 * s:
+                    self.vx = 0.0
+                self.bounce_walls(0.4)
+            return
+        now = time.time()
+        if self.chute is None:
+            self.fall_speed += GRAVITY * s * dt
+            self.vx *= 0.995  # a little air drag
+            drop = self.air + max(0.0, self.fall_speed) ** 2 / (2 * GRAVITY * s)
+            self.fall_from = max(self.fall_from, self.air)
+            # A moment of free fall first, then it pulls the cord.
+            if self.fall_speed > 500 * s and drop > self.px(DANGER_DROP):
+                self.open_chute(now)
+        elif self.chute == "parachute":
+            ease = min(1.0, 3.5 * dt)
+            self.fall_speed += (210 * s - self.fall_speed) * ease
+            self.vx += (math.sin(now * 1.3) * 40 * s - self.vx) * ease
+        else:  # glider: keeps flying the way it was thrown, sinking gently
+            ease = min(1.0, 2.5 * dt)
+            heading = 1 if self.vx >= 0 else -1
+            self.fall_speed += (170 * s + math.sin(now * 2.1) * 30 * s
+                                - self.fall_speed) * ease
+            self.vx += (heading * 340 * s - self.vx) * ease
+        self.x += self.vx * dt
+        self.air -= self.fall_speed * dt
+        self.bounce_walls(0.55 if self.chute is None else 1.0)
+        under = self.screen_at(self.x + self.w / 2, self.window_y() + self.h / 2)
+        if under is not None and under != self.screen:
+            bottom = self.area()[3]
+            self.go_to_screen(under)  # flew onto another screen: keep the same height
+            self.air = max(1.0, self.air + self.area()[3] - bottom)
+        _, top, _, bottom = self.area()
+        ceiling = bottom - top - self.h
+        if self.air > ceiling:  # bonk on the top of the screen
+            self.air = float(ceiling)
+            self.fall_speed = abs(self.fall_speed) * 0.4
+        if self.air <= 0:
+            self.land()
+
+    def bounce_walls(self, keep):
+        """Bounce off the outer edges of the screens while flying or skidding."""
+        left = min(m["rect"][0] for m in self.screens)
+        right = max(m["rect"][2] for m in self.screens) - self.w
+        if self.x < left or self.x > right:
+            self.x = float(left if self.x < left else right)
+            self.vx = -self.vx * keep
+            if self.chute is None and abs(self.vx) > 200 * self.s:
+                self.mood("dizzy", 1.5)
+
+    def open_chute(self, now):
+        self.chute = "glider" if abs(self.vx) > GLIDE_SPEED * self.s else "parachute"
+        self.chute_at = now
+        self.pivot = (self.w / 2, self.px(30))  # hangs from the canopy or wing
+        self.swing_omega = 0.0
+        self.mood("excited", 1.5)
+        if random.random() < 0.6:
+            self.say(random.choice(GLIDER_OPEN if self.chute == "glider" else CHUTE_OPEN),
+                     seconds=2.5)
+
+    def land(self):
+        chute, self.chute = self.chute, None
+        self.air, self.fall_speed = 0.0, 0.0
+        left, _, right, _ = self.area()
+        self.x = float(min(max(self.x, left), right - self.w))
+        if self.vx:
+            self.direction = 1 if self.vx > 0 else -1
+        skid = abs(self.vx) > 250 * self.s and chute is None
+        self.vx = self.vx * 0.5 if skid else 0.0
+        if chute:  # a safe, proud landing
+            self.mood("happy", 2.5)
+            if random.random() < 0.75:
+                self.say(random.choice(GLIDER_LANDED if chute == "glider" else CHUTE_LANDED))
+        elif self.fall_from > self.px(60) or skid:
+            self.jump()
+            self.mood("dizzy", 2.5)
+            if random.random() < 0.7:
+                self.say(random.choice(SKIDDED if skid else LANDED))
+        self.fall_from = 0.0
 
     def on_right_click(self, event):
         # Windows only closes a popup menu on an outside click if we are foreground.
@@ -1249,7 +1369,8 @@ class Blip:
         center = int(self.x) + self.w // 2
         fade = min(1.0, (time.time() - self.bubble_shown_at) / 0.18)
         bx = min(max(center - width // 2, left), right - width)
-        by = max(self.window_y() + int(self.head_y) - height + px(4), top)
+        anchor = px(4) if self.chute else int(self.head_y)  # above the canopy or wing
+        by = max(self.window_y() + anchor - height + px(4), top)
         by += int((1 - fade) * px(8))  # rises into place as it fades in
         self.bubble.geometry(f"{width}x{height}+{bx}+{by}")
         if fade < 1 or self.bubble_alpha < 1:
@@ -1410,6 +1531,16 @@ class Blip:
             if name == "emote":
                 self.emote_face = random.choice(list(EMOTES))
 
+    def start_act(self, name):
+        """Do one antic now, when asked from the menu."""
+        if self.dragging or self.air > 0 or self.leap or self.act == "wait":
+            return
+        self.hush()
+        seconds = next(a[2] for a in ANTICS if a[0] == name)
+        now = time.time()
+        self.last_antic = name
+        self.act, self.act_start, self.act_end = name, now, now + seconds
+
     def update_act(self, now):
         if self.act in (None, "wait") or now < self.act_end:
             return
@@ -1435,11 +1566,16 @@ class Blip:
         elif name == "dance" and random.random() < 0.6:
             self.mood("happy", 2)
             self.say(random.choice(DANCE_DONE))
+        elif name == "moonwalk":
+            self.jump()  # a little hop to finish
+            self.mood("smug", 2.5)
+            if random.random() < 0.7:
+                self.say(random.choice(MOONWALK_DONE))
 
     def antic_due(self, now):
         return (not self.quiet.get() and self.act is None and not self.bubble_until
                 and not self.menu_open and self.jump_started is None
-                and not self.dragging and self.air == 0 and not self.leap
+                and not self.dragging and self.air == 0 and not self.vx and not self.leap
                 and now > self.next_antic)
 
     # -- animation
@@ -1475,6 +1611,8 @@ class Blip:
             target = (0.7, -0.9)
         elif self.act == "update":
             target = (0.0, -1.0)
+        elif self.act == "moonwalk":
+            target = (0.8 * self.direction, 0.05)
         elif self.mode == "walk" and self.act is None:
             target = (0.7 * self.direction, 0.1)
         else:
@@ -1496,9 +1634,15 @@ class Blip:
         grounded = not self.dragging and self.air == 0
         walking = (self.mode == "walk" and self.act is None and not self.watching
                    and not self.bubble_until and not self.menu_open
-                   and self.jump_started is None and grounded)
+                   and self.jump_started is None and grounded and not self.vx)
         if self.act == "skate" and grounded:
             self.x += self.direction * 170 * self.s * self.FRAME_MS / 1000
+        if self.act == "moonwalk" and grounded:
+            # Faces one way, slides the other: same footwork as walking, run backwards.
+            distance = MOONWALK_SPEED * self.s * self.FRAME_MS / 1000
+            self.x -= self.direction * distance
+            self.gait = (self.gait + distance / (2 * STRIDE * self.s)) % 1
+            self.step = self.gait * 2 * math.pi
         if walking:
             distance = WALK_SPEED * self.s * self.FRAME_MS / 1000
             self.x += self.direction * distance
@@ -1510,6 +1654,9 @@ class Blip:
         if grounded and (self.x <= left or self.x >= right - self.w):
             going = -1 if self.x <= left else 1
             self.x = float(left if going < 0 else right - self.w)
+            if self.act == "moonwalk":
+                self.direction = going  # face the edge, keep sliding away from it
+                return walking
             moving = walking or self.act == "skate"
             target = self.neighbour(going) if moving else None
             if target is not None:
@@ -1530,6 +1677,8 @@ class Blip:
             return "worried"
         if self.leap:
             return "excited"
+        if self.chute:
+            return "surprised" if now - self.chute_at < 0.5 else "happy"
         if self.jump_started is not None or self.air > 0:
             return "surprised"
         if act in ("nap", "glitch", "spin"):
@@ -1540,6 +1689,8 @@ class Blip:
             return self.emote_face
         if act in ("dance", "skate"):
             return "happy"
+        if act == "moonwalk":
+            return "smug"
         if now < self.mood_until:
             return self.mood_face
         if now < self.talk_until:
@@ -1566,6 +1717,8 @@ class Blip:
             return -13.0 + math.sin(now * 1.2) * 2
         if act == "dance":
             return math.sin(t * 7) * 12
+        if act == "moonwalk":  # leaning into it, nodding to the beat
+            return 6 * self.direction + math.sin(t * 6) * 2
         if act == "glitch":
             return random.uniform(-8, 8)
         if now < self.wave_until:  # eager to help: bobbing, leaning in
@@ -1592,9 +1745,12 @@ class Blip:
             bob = abs(math.sin(self.step))
         elif act == "dance":
             bob = abs(math.cos(t * 7))
+        elif act == "moonwalk":
+            bob = abs(math.sin(self.step)) * 0.5
         else:
             bob = 0.0
-        resting = not walking and act not in ("dance", "skate") and not airborne
+        resting = (not walking and act not in ("dance", "skate", "moonwalk")
+                   and not airborne)
         breathe = math.sin(now * (1.2 if act == "nap" else 2.2)) * (1.8 if act == "nap" else 1) \
             if resting else 0.0
         stretch = 0.0
@@ -1632,10 +1788,23 @@ class Blip:
         body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s
         body_top = body_bottom - 19 * s + breathe * 0.6 * s
         bx1, bx2 = cx - 20 * s, cx + 20 * s
+        if self.chute:
+            self.draw_chute(c, now, cx, body_top, front=False)
         stride = STRIDE * s
+        moonwalk = act == "moonwalk"
         for i, side in enumerate((-1, 1)):
-            lift = 0.0
-            if walking:
+            lift, tiptoe = 0.0, False
+            if moonwalk:
+                # Run the walk backwards: the foot that holds still in the world is
+                # up on its toes, and the other one slides back flat along the floor.
+                phase = (self.gait + (0.5 if side > 0 else 0.0)) % 1
+                if phase < 0.5:
+                    off = stride / 2 - phase / 0.5 * stride
+                    tiptoe = True
+                else:
+                    off = -stride / 2 + (phase - 0.5) / 0.5 * stride
+                self.foot_off[i] = -off * self.direction
+            elif walking:
                 # Stance: the foot stays put on the ground while the body passes over
                 # it. Swing: it lifts and travels forward to the next footprint.
                 phase = (self.gait + (0.5 if side > 0 else 0.0)) % 1
@@ -1654,13 +1823,16 @@ class Blip:
                     lift = (math.sin(now * 7 + side * 1.6) + 1) * 2 * s
             hip_x = cx + side * 12 * s
             fx = cx + side * 14 * s + self.foot_off[i]
-            knee_y = ground - 9 * s - lift
+            knee_y = ground - 9 * s - lift - (5 * s if tiptoe else 0)
             c.create_line(hip_x, body_bottom - 2 * s, fx, knee_y, fill=OUTLINE,
                           width=max(6, self.px(13)), capstyle="round")
             c.create_line(hip_x, body_bottom - 2 * s, fx, knee_y, fill=LEG,
                           width=max(4, self.px(10.5)), capstyle="round")
             c.create_line(hip_x - 2.5 * s, body_bottom, fx - 2.5 * s, knee_y - 1 * s,
                           fill=LEG_LIGHT, width=max(1, self.px(2)))
+            if tiptoe:  # heel up, balanced on the toe
+                self.tiptoe_foot(c, fx, ground, lw)
+                continue
             shaded(flat, fx - 11 * s, ground - 11 * s - lift, fx + 11 * s, ground - lift,
                    3.5 * s, FOOT, FOOT_LIGHT, outline=OUTLINE, steps=3)
             c.create_line(fx - 9 * s, ground - 2 * s - lift, fx + 9 * s, ground - 2 * s - lift,
@@ -1790,11 +1962,110 @@ class Blip:
 
         self.head_y = band_y - band_rise - 5 * s
         self.draw_prop(c, now, cx, bx1, bx2, body_top, cup, ground, walking)
+        if self.chute:
+            self.draw_chute(c, now, cx, body_top, front=True)
 
         self.draw_effects(c, now, t, cx, self.head_y)
         self.draw_mood_effects(c, now, cx, self.head_y, self.face_now)
         if abs(self.swing) > 0.002:
             self.rotate_all(*self.pivot, self.swing)
+
+    def tiptoe_foot(self, c, fx, ground, lw):
+        """A foot tipped up onto its toe, toe pointing the way Blip faces."""
+        s, d = self.s, self.direction
+        toe_x, toe_y = fx + d * 11 * s, ground
+        a = 0.38 * d
+        cos_a, sin_a = math.cos(a), math.sin(a)
+
+        def turned(points):
+            out = []
+            for i in range(0, len(points), 2):
+                dx, dy = points[i] - toe_x, points[i + 1] - toe_y
+                out += [toe_x + dx * cos_a - dy * sin_a, toe_y + dx * sin_a + dy * cos_a]
+            return out
+        c.create_polygon(turned(rrect_points(fx - 11 * s, ground - 11 * s, fx + 11 * s, ground,
+                                             3.5 * s)),
+                         smooth=True, fill=FOOT, outline=OUTLINE, width=lw)
+        c.create_polygon(turned(rrect_points(fx - 8 * s, ground - 9 * s, fx + 5 * s,
+                                             ground - 5 * s, 2 * s)),
+                         smooth=True, fill=FOOT_LIGHT, outline="")
+        c.create_line(*turned([fx - 9 * s, ground - 2 * s, fx + 9 * s, ground - 2 * s]),
+                      fill=ACCENT, width=max(2, self.px(2)))
+
+    def draw_chute(self, c, now, cx, body_top, front):
+        """The parachute canopy (behind Blip) or the hang-glider (wing behind,
+        control bar in front), popping open over a third of a second."""
+        s = self.s
+        lw = max(1, self.px(1.5))
+        k = min(1.0, (now - self.chute_at) / 0.35)
+        k = 1 - (1 - k) ** 3  # ease out: snaps open
+        cord = mix(LEG_LIGHT, "#ffffff", 0.35)
+        if self.chute == "parachute":
+            if front:
+                return
+            top, rim = 6 * s, 46 * s
+            half = (84 * s + math.sin(now * 3) * 2.5 * s) * (0.25 + 0.75 * k)
+            rise = (rim - top) * (0.4 + 0.6 * k)
+            gores = 7
+            angles = [math.pi * i / gores for i in range(gores + 1)]
+            # lines from the rim down to the harness, drawn first so they sit behind
+            for side in (-1, 1):
+                for a in angles:
+                    rx = cx + half * math.cos(a)
+                    if (rx - cx) * side < 3 * s:
+                        continue
+                    c.create_line(rx, rim, cx + side * 18 * s, body_top + 4 * s,
+                                  fill=cord, width=max(1, self.px(1.1)))
+            for i in range(gores):
+                a1, a2 = angles[i], angles[i + 1]
+                arc = []
+                for j in range(5):
+                    a = a1 + (a2 - a1) * j / 4
+                    arc += [cx + half * math.cos(a), rim - rise * math.sin(a)]
+                x1, x2 = cx + half * math.cos(a1), cx + half * math.cos(a2)
+                mid = (x1 + x2) / 2
+                bottom = [x2, rim, mid, rim - 4 * s, x1, rim]  # scalloped hem
+                base = ACCENT if i % 2 == 0 else BODY_MAIN
+                light = 0.35 * (i / (gores - 1))  # lit from the top left
+                c.create_polygon(arc + bottom, fill=mix(base, "#ffffff", 0.3 - light),
+                                 outline=OUTLINE, width=lw)
+            c.create_oval(cx - 5 * s, rim - rise - 3 * s, cx + 5 * s, rim - rise + 3 * s,
+                          fill=SHELL, outline=OUTLINE, width=1)  # the vent at the top
+            return
+        heading = 1 if self.vx >= 0 else -1
+        span = 102 * s * (0.2 + 0.8 * k)
+        keel_y = 40 * s
+        bar_y = body_top + 9 * s
+        if not front:
+            # Seen from a little below: a delta sail, nose ahead, tips swept back.
+            nose = (cx + heading * 34 * s * k, 16 * s)
+            tail = (cx - heading * 6 * s, 16 * s + 44 * s * k)
+            left, right = (cx - span, 38 * s), (cx + span, 38 * s)
+            for side in (-1, 1):  # control-frame struts down to the bar
+                c.create_line(cx, keel_y, cx + side * 38 * s, bar_y, fill=OUTLINE,
+                              width=max(3, self.px(3.5)), capstyle="round")
+                c.create_line(cx, keel_y, cx + side * 38 * s, bar_y, fill=SLIDER,
+                              width=max(1, self.px(2)), capstyle="round")
+            c.create_polygon(*left, *nose, *tail, fill=ACCENT, outline=OUTLINE, width=lw)
+            c.create_polygon(*right, *nose, *tail, fill=mix(ACCENT, "#ffffff", 0.45),
+                             outline=OUTLINE, width=lw)
+            for frac in (0.35, 0.7):  # battens
+                for wing in (left, right):
+                    bx = nose[0] + (wing[0] - nose[0]) * frac
+                    by = nose[1] + (wing[1] - nose[1]) * frac
+                    c.create_line(bx, by, tail[0] + (bx - tail[0]) * 0.25,
+                                  tail[1] + (by - tail[1]) * 0.25,
+                                  fill=mix(OUTLINE, ACCENT, 0.4), width=1)
+            c.create_line(*nose, *tail, fill=OUTLINE, width=max(2, self.px(2.5)))
+            return
+        c.create_line(cx - 38 * s, bar_y, cx + 38 * s, bar_y, fill=OUTLINE,
+                      width=max(4, self.px(4.5)), capstyle="round")
+        c.create_line(cx - 38 * s, bar_y, cx + 38 * s, bar_y, fill=SLIDER,
+                      width=max(2, self.px(2.6)), capstyle="round")
+        for side in (-1, 1):  # little hands gripping the bar
+            hx = cx + side * 25 * s
+            c.create_oval(hx - 5 * s, bar_y - 5 * s, hx + 5 * s, bar_y + 5 * s,
+                          fill=SHELL, outline=OUTLINE, width=lw)
 
     def current_prop(self, now):
         """What Blip holds: what the moment calls for, else your chosen accessory."""
@@ -1808,7 +2079,7 @@ class Blip:
             return "phone"  # a Claude Code alert came in
         if act is None and self.working_on_claude(now):
             return "laptop"  # keeping Claude company while it works
-        if act == "dance":
+        if act in ("dance", "moonwalk"):
             return "music"
         if self.accessory == "rotate":
             return self.rotation_pick(now)
@@ -2179,6 +2450,15 @@ class Blip:
             ax = max(-9000 * s, min(9000 * s, (smooth - self.pivot_vx) / dt))
             self.pivot_vx = smooth
             gravity = 2600 * s
+        elif self.chute:  # hanging under a canopy or wing: a gentle sway
+            now = time.time()
+            if self.chute == "parachute":
+                target = math.sin(now * 1.6) * 0.14
+            else:
+                target = 0.07 * (1 if self.vx >= 0 else -1) + math.sin(now * 2.1) * 0.04
+            self.swing += (target - self.swing) * 0.12
+            self.swing_omega = 0.0
+            return
         elif self.air > 0:  # falling: gravity barely turns it, it just settles
             ax, gravity = 0.0, 500 * s
         else:
@@ -2214,7 +2494,7 @@ class Blip:
                 c.create_text(cx + 10 * s + phase * 18 * s, head_y - phase * 45 * s,
                               text="z" if k % 2 else "Z", fill=BODY_DARK,
                               font=("Segoe UI", int(8 + phase * 6), "bold"))
-        elif act == "dance":
+        elif act in ("dance", "moonwalk"):
             for k in range(2):
                 phase = (t * 0.6 + k / 2) % 1
                 side = -1 if k else 1
