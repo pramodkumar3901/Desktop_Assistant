@@ -129,7 +129,10 @@ MOONWALK_DONE = ["Walking forward is so last version.",
 ANTICS = [("think", 3.0, 3.0), ("glitch", 1.5, 1.4), ("nap", 1.0, 10.0),
           ("dance", 1.5, 4.5), ("update", 1.0, 6.5), ("spin", 1.0, 3.0),
           ("suggest", 1.8, 0.0), ("skate", 1.5, 6.0), ("emote", 2.5, 3.0),
-          ("moonwalk", 1.2, 5.5)]
+          ("moonwalk", 1.2, 5.5), ("lean", 1.6, 0.0)]
+LEAN_DONE = ["Corner break over. Back to being helpful!",
+             "That wall is surprisingly comfy.",
+             "Rested my circuits. Where were we?"]
 
 # Expressions Blip pulls on its own, and what it might say afterwards.
 EMOTES = {
@@ -1023,6 +1026,7 @@ class Blip:
         self.trail = []         # recent (time, x, air) while dragged, to measure a throw
         self.chute, self.chute_at = None, 0.0  # "parachute" / "glider" and when it opened
         self.door = None        # arriving or leaving through a door at a screen edge
+        self.lean = None        # a break sitting against a screen's edge
         self.door_win = None
         self.pivot = (self.w / 2, self.h / 2)  # grip point on the canvas
         self.swing = 0.0                        # hanging angle, radians
@@ -1166,6 +1170,7 @@ class Blip:
         talk.add_separator()
         talk.add_command(label="Do something random", command=self.start_antic)
         talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
+        talk.add_command(label="Take a corner break", command=lambda: self.start_act("lean"))
         menu.add_cascade(label="Talk to me", menu=talk)
         menu.add_separator()
         # 2. Claude Code
@@ -2180,6 +2185,8 @@ class Blip:
             self.act = None
             self.next_antic = now + random.uniform(*ANTIC_GAP)
             self.suggest()
+        elif name == "lean":
+            self.begin_lean(now)
         else:
             self.act, self.act_start, self.act_end = name, now, now + seconds
             if name == "emote":
@@ -2193,7 +2200,83 @@ class Blip:
         seconds = next(a[2] for a in ANTICS if a[0] == name)
         now = time.time()
         self.last_antic = name
+        if name == "lean":
+            self.begin_lean(now)
+            return
         self.act, self.act_start, self.act_end = name, now, now + seconds
+
+    def begin_lean(self, now):
+        """Stroll to a bottom corner, sit with its back to the screen's edge, and think
+        or doze for a while."""
+        left, _, right, _ = self.area()
+        centre = self.x + self.w / 2
+        side = -1 if centre - left < right - centre else 1
+        if random.random() < 0.25:
+            side = -side  # now and then, the far corner
+        self.lean = {"side": side, "phase": "walk", "at": now,
+                     "mode": random.choice(("think", "doze", "doze")),
+                     "rest": random.uniform(8, 16)}
+        self.act, self.act_start, self.act_end = "lean", now, float("inf")
+
+    def lean_step(self, now):
+        """Run a corner break. True while Blip is walking to its corner."""
+        lean = self.lean
+        left, _, right, _ = self.area()
+        side = lean["side"]
+        edge, inward = (left, 1) if side < 0 else (right, -1)
+        spot = edge + inward * self.px(40) - self.w / 2  # its back against the edge
+        phase, age = lean["phase"], now - lean["at"]
+        if phase == "walk":
+            going = 1 if spot > self.x else -1
+            step = min(abs(spot - self.x), WALK_SPEED * 1.3 * self.s * self.FRAME_MS / 1000)
+            if step > 0.01:
+                self.direction = going
+                self.x += going * step
+                self.gait = (self.gait + step / (2 * STRIDE * self.s)) % 1
+                self.step = self.gait * 2 * math.pi
+                return True
+            lean["phase"], lean["at"] = "sit", now
+            self.direction = inward  # turns its back to the wall
+        elif phase == "sit" and age > 0.7:
+            lean["phase"], lean["at"] = "rest", now
+        elif phase == "rest":
+            if lean["mode"] == "doze" and self.watching:
+                lean["phase"], lean["at"] = "stand", now
+                lean["woken"] = True
+                self.say(random.choice(WOKEN))
+            elif age > lean["rest"]:
+                lean["phase"], lean["at"] = "stand", now
+        elif phase == "stand" and age > 0.6:
+            self.act, self.lean = None, None
+            self.next_antic = now + random.uniform(*ANTIC_GAP)
+            self.mode, self.mode_until = "walk", now + random.uniform(4, 9)
+            self.direction = inward  # off it goes, away from the wall
+            if lean.get("woken"):
+                pass
+            elif lean["mode"] == "think":
+                self.say_kind("thought")
+            else:
+                self.say(random.choice(LEAN_DONE))
+        return False
+
+    def sit_amount(self, now):
+        """0 standing .. 1 sitting on the floor, for the corner break."""
+        lean = self.lean if self.act == "lean" else None
+        if not lean or lean["phase"] == "walk":
+            return 0.0
+        age = now - lean["at"]
+        if lean["phase"] == "sit":
+            k = min(1.0, age / 0.7)
+        elif lean["phase"] == "stand":
+            k = 1 - min(1.0, age / 0.6)
+        else:
+            k = 1.0
+        return 0.5 - 0.5 * math.cos(math.pi * k)
+
+    def lean_resting(self):
+        """'think' or 'doze' while sitting in the corner, else None."""
+        lean = self.lean if self.act == "lean" else None
+        return lean["mode"] if lean and lean["phase"] == "rest" else None
 
     def update_act(self, now):
         if self.act in (None, "wait") or now < self.act_end:
@@ -2268,6 +2351,8 @@ class Blip:
             target = (0.0, -1.0)
         elif self.act == "moonwalk":
             target = (0.8 * self.direction, 0.05)
+        elif self.lean_resting() == "think":
+            target = (0.6 * self.direction, -0.9)
         elif self.mode == "walk" and self.act is None:
             target = (0.7 * self.direction, 0.1)
         else:
@@ -2286,6 +2371,8 @@ class Blip:
         if self.leap:
             self.update_leap(now)
             return False
+        if self.act == "lean" and self.lean and not self.dragging and self.air == 0:
+            return self.lean_step(now)
         grounded = not self.dragging and self.air == 0
         walking = (self.mode == "walk" and self.act is None and not self.watching
                    and not self.bubble_until and not self.menu_open
@@ -2346,6 +2433,8 @@ class Blip:
             return "happy"
         if act == "moonwalk":
             return "smug"
+        if act == "lean" and self.lean_resting():
+            return "think" if self.lean_resting() == "think" else "sleep"
         if now < self.mood_until:
             return self.mood_face
         if now < self.talk_until:
@@ -2372,6 +2461,11 @@ class Blip:
             return -13.0 + math.sin(now * 1.2) * 2
         if act == "dance":
             return math.sin(t * 7) * 12
+        if act == "lean" and self.lean and self.lean["phase"] != "walk":
+            sit = self.sit_amount(now)
+            dozing = self.lean_resting() == "doze"
+            return self.lean["side"] * (7 + (8 if dozing else 0)) * sit + (
+                math.sin(now * 1.1) * 1.5 if dozing else 0.0)
         if act == "moonwalk":  # leaning into it, nodding to the beat
             return 6 * self.direction + math.sin(t * 6) * 2
         if act == "glitch":
@@ -2406,7 +2500,8 @@ class Blip:
             bob = 0.0
         resting = (not walking and act not in ("dance", "skate", "moonwalk")
                    and not airborne)
-        breathe = math.sin(now * (1.2 if act == "nap" else 2.2)) * (1.8 if act == "nap" else 1) \
+        sleepy = act == "nap" or self.lean_resting() == "doze"
+        breathe = math.sin(now * (1.2 if sleepy else 2.2)) * (1.8 if sleepy else 1) \
             if resting else 0.0
         stretch = 0.0
         if self.jump_started is not None:
@@ -2415,7 +2510,8 @@ class Blip:
         # While it travels, Blip turns three-quarters toward where it's going, and
         # turns back to face you when it stops. Everything below is drawn as if
         # rotated about the vertical axis by `yaw`.
-        side_on = (walking or act in ("moonwalk", "skate")) and not airborne
+        sit = self.sit_amount(now)
+        side_on = (walking or act in ("moonwalk", "skate", "lean")) and not airborne
         self.turn += ((1.0 if side_on else 0.0) - self.turn) * 0.14
         yaw = math.radians(50) * self.turn * self.direction
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
@@ -2449,7 +2545,7 @@ class Blip:
             ground -= 10 * s
 
         # legs and chunky feet
-        body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s
+        body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s + 11 * s * sit
         body_top = body_bottom - 19 * s + breathe * 0.6 * s
         body_half = 20 * s * cos_y + 13 * s * abs(sin_y)  # a box 40 wide, 26 deep
         bx1, bx2 = cx - body_half, cx + body_half
@@ -2482,6 +2578,9 @@ class Blip:
                     off = -stride / 2 + k * stride
                     lift = math.sin(math.pi * k) * 6 * s
                 self.foot_off[i] = off * self.direction
+            elif sit > 0:  # sitting: legs stretched out ahead along the floor
+                ahead = self.direction * (19 * s + (5 * s if side == near else 0))
+                self.foot_off[i] = (ahead - side * 14 * s * cos_y) * sit
             else:
                 self.foot_off[i] *= 0.7  # feet shuffle back under the body
                 if act == "dance":
@@ -2772,6 +2871,8 @@ class Blip:
     def current_prop(self, now):
         """What Blip holds: what the moment calls for, else your chosen accessory."""
         act = self.act
+        if act == "lean" and self.lean and self.lean["phase"] != "walk":
+            return None  # hands free for a proper rest
         if (self.dragging or self.air > 0 or self.leap
                 or act in ("nap", "skate", "glitch", "spin")):
             return None
@@ -2796,9 +2897,95 @@ class Blip:
                 self.jump()
         return self.rotation
 
+    def draw_arm(self, c, x0, y0, x1, y1):
+        """A stubby arm from the shoulder, ending in a round hand."""
+        s, px = self.s, self.px
+        c.create_line(x0, y0, x1, y1, fill=OUTLINE, width=max(4, px(5.5)), capstyle="round")
+        c.create_line(x0, y0, x1, y1, fill=LEG, width=max(3, px(3.5)), capstyle="round")
+        c.create_oval(x1 - 3.8 * s, y1 - 3.8 * s, x1 + 3.8 * s, y1 + 3.8 * s,
+                      fill=LEG_LIGHT, outline=OUTLINE)
+
+    def draw_carry(self, c, now, prop, cx, bx1, bx2, top, cup):
+        """Walking with something: it's held in the leading hand, bobbing a little
+        with each step, while the other arm swings along."""
+        s, px = self.s, self.px
+        lead = self.direction
+        swing = math.sin(self.step)
+        bounce = abs(math.sin(self.step)) * 1.2 * s
+        shoulder_y = top + 7 * s
+        lead_sh = bx2 - 1 * s if lead > 0 else bx1 + 1 * s
+        back_sh = bx1 + 1 * s if lead > 0 else bx2 - 1 * s
+        # the free arm swings with the stride, opposite the near leg
+        self.draw_arm(c, back_sh, shoulder_y, back_sh - lead * 3 * s + lead * swing * 6 * s,
+                      top + 19 * s - abs(swing) * 1.5 * s)
+        if prop == "laptop":  # shut, tucked flat under the arm like a book
+            x_from, x_to = cx - lead * 2 * s, cx + lead * 40 * s
+            y1 = top + 9 * s - bounce * 0.5
+            lo, hi = min(x_from, x_to), max(x_from, x_to)
+            rrect(c, lo, y1, hi, y1 + 7.5 * s, 2 * s, fill=LAPTOP, outline=OUTLINE, width=1)
+            c.create_line(lo + 2 * s, y1 + 4 * s, hi - 2 * s, y1 + 4 * s, fill=MUG_DARK,
+                          width=1)  # the seam between lid and base
+            c.create_line(lo + 2.5 * s, y1 + 1.6 * s, hi - 2.5 * s, y1 + 1.6 * s,
+                          fill=LAPTOP_HI, width=max(1, px(1.2)))
+            self.draw_arm(c, lead_sh, shoulder_y, cx + lead * 33 * s, y1 + 4 * s)
+        elif prop == "phone":  # held up ahead, glancing at it while walking
+            buzzing = now < self.phone_until - PHONE_SECONDS + 2.5
+            x1 = cx + lead * 46 * s - 6.5 * s + (math.sin(now * 70) * 1.2 * s if buzzing else 0)
+            y1 = top - 20 * s - bounce
+            rrect(c, x1, y1, x1 + 13 * s, y1 + 23 * s, 2.5 * s, fill=PHONE_BODY,
+                  outline=OUTLINE, width=1)
+            rrect(c, x1 + 1.5 * s, y1 + 2 * s, x1 + 11.5 * s, y1 + 20.5 * s, 1.5 * s,
+                  fill=PHONE_SCREEN, outline="")
+            for i in range(3):
+                yy = y1 + 4 * s + i * 5 * s
+                rrect(c, x1 + 3 * s, yy, x1 + 10 * s, yy + 3.2 * s, 1 * s,
+                      fill=ACCENT if i == 0 else mix(EYE, "#000000", 0.35), outline="")
+            self.draw_arm(c, lead_sh, shoulder_y, x1 + 6.5 * s - lead * 2 * s, y1 + 19 * s)
+        elif prop == "music":  # the player held out ahead, wired to the headphones
+            x1, y1 = cx + lead * 43 * s - 7 * s, top + 4 * s - bounce
+            c.create_line(x1 + 7 * s, y1, (x1 + 7 * s + cup[0]) / 2, y1 - 12 * s, cup[0],
+                          cup[1], fill=OUTLINE, width=max(1, px(1.5)), smooth=True)
+            rrect(c, x1, y1, x1 + 14 * s, y1 + 22 * s, 3 * s, fill=PLAYER, outline=OUTLINE,
+                  width=1)
+            rrect(c, x1 + 2 * s, y1 + 2 * s, x1 + 12 * s, y1 + 9.5 * s, 1.5 * s,
+                  fill=PHONE_SCREEN, outline="")
+            for i in range(4):
+                h = (1 + abs(math.sin(now * 6 + i * 1.7)) * 4.5) * s
+                xx = x1 + 3.6 * s + i * 2.3 * s
+                c.create_line(xx, y1 + 8.5 * s, xx, y1 + 8.5 * s - h, fill=EYE,
+                              width=max(1, px(1.3)))
+            c.create_oval(x1 + 3.5 * s, y1 + 11.5 * s, x1 + 10.5 * s, y1 + 18.5 * s,
+                          fill=PLAYER_WHEEL, outline=OUTLINE)
+            self.draw_arm(c, lead_sh, shoulder_y, x1 + 7 * s - lead * 3 * s, y1 + 15 * s)
+        elif prop == "coffee":  # carried carefully ahead, steam trailing behind
+            x1, y1 = cx + lead * 44 * s - 6 * s, top + 3 * s - bounce * 0.4
+            hx = x1 - 6 * s if lead > 0 else x1 + 8 * s  # handle on Blip's side
+            c.create_arc(hx, y1 + 3 * s, hx + 10 * s, y1 + 12 * s,
+                         start=90 if lead > 0 else -90, extent=180, style="arc",
+                         outline=MUG_DARK, width=max(2, px(2.5)))
+            rrect(c, x1, y1, x1 + 12 * s, y1 + 15 * s, 2.5 * s, fill=MUG, outline=OUTLINE,
+                  width=1)
+            c.create_line(x1 + 1.5 * s, y1 + 5 * s, x1 + 10.5 * s, y1 + 5 * s, fill=ACCENT,
+                          width=max(2, px(2)))
+            for k in range(2):  # steam drifts back as Blip walks
+                phase = (now * 0.7 + k * 0.5) % 1
+                sx = x1 + (4 + k * 4) * s
+                pts = []
+                for j in range(6):
+                    t = j / 5
+                    pts.extend((sx - lead * t * 5 * s
+                                + math.sin(t * 6 + now * 3 + k) * 1.2 * s,
+                                y1 - 2 * s - (t * 10 + phase * 6) * s))
+                c.create_line(*pts, fill=STEAM, width=max(1, px(1.4)), smooth=True)
+            self.draw_arm(c, lead_sh, shoulder_y, hx + (3 * s if lead > 0 else 7 * s),
+                          y1 + 8 * s)
+
     def draw_prop(self, c, now, cx, bx1, bx2, top, cup, ground, walking):
         prop = self.current_prop(now)
         if not prop:
+            return
+        if walking or self.act == "moonwalk":
+            self.draw_carry(c, now, prop, cx, bx1, bx2, top, cup)
             return
         s, px = self.s, self.px
         thin = max(1, px(1.5))
@@ -3184,6 +3371,8 @@ class Blip:
 
     def draw_effects(self, c, now, t, cx, head_y):
         s, act = self.s, self.act
+        if act == "lean":
+            act = {"think": "think", "doze": "nap"}.get(self.lean_resting())
         if act in ("think", "wait"):
             lit = int(now * 3) % 4
             for i in range(3):

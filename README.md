@@ -43,7 +43,7 @@ The right-click menu, in three groups:
 | Menu | Holds |
 | --- | --- |
 | **Rewrite copied text** | Improve it, Make it shorter, More professional, Friendlier, Fix grammar only, Undo last rewrite |
-| **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random, Moonwalk for me |
+| **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random, Moonwalk for me, Take a corner break |
 | **Claude Code** | Connected to Claude Code, Show alerts, A mini Blip for each extra session, What can you do?, Send a test alert |
 | **Look** | Accessory (Rotate, Nothing, Laptop, Phone, Music player, Coffee mug) and Size (Tiny, the default; Medium; Large) |
 | **Updates** | The version, Update automatically, Check for updates now |
@@ -69,12 +69,13 @@ to Claude until you ask; each rewrite is one Claude request. Drafts up to 12,000
 Blip holds one accessory at a time (right-click → **Accessory**). By default it
 **rotates**: every few minutes it hops and swaps to a different one.
 
-- **Laptop:** open on the floor beside Blip, which leans over and types; carried shut
+- **Laptop:** open on the floor beside Blip, which leans over and types; tucked shut
   under its arm while walking.
 - **Phone:** held up, with notification cards on its screen.
 - **Music player:** wired to its headphones, with a little equaliser.
 - **Coffee mug:** with steam rising.
 
+While walking, Blip carries it out ahead in its leading hand and swings the other arm.
 It also picks one up when it fits the moment: the laptop while it's working on something,
 the phone when Claude Code needs you, the music player while it dances. Your choice is
 remembered in `blip_settings.json`.
@@ -91,6 +92,9 @@ Every 25–70 seconds it does something on its own:
 - **Installs a pointless update** (with a progress bar)
 - **Loads** with spinning eyes
 - **Rides a skateboard** across the screen
+- **Takes a corner break**: strolls to a bottom corner, sits with its back against the
+  screen's edge and dozes (Zzz, wakes if your mouse comes near) or thinks, then gets up
+  (also in **Talk to me → Take a corner break**)
 - **Moonwalks**: faces one way and glides the other, up on its toes (also in **Talk to me → Moonwalk for me**)
 - **Pulls a face** (heart eyes, a wink, a scowl, tears...) and sometimes explains it
 - **Offers help nobody asked for**: "It looks like you're...", with
