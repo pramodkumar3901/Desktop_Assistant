@@ -5,3 +5,5 @@ blip.log
 # One-click shortcuts point to paths on one PC; see the README to make your own
 *.lnk
 __pycache__/
+blip_update.json
+.update_backup/
