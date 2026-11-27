@@ -34,6 +34,7 @@ RETRY_AFTER = 60         # after a failed call, don't refill in the background t
 BACKGROUND_GAP = 10 * 60 # antics alone never ask Claude more often than this
 ANTIC_GAP = (25, 70)     # seconds between random antics
 LOG_FILE = Path(__file__).with_name("blip.log")
+ICON_FILE = Path(__file__).with_name("blip.ico")
 SETTINGS_FILE = Path(__file__).with_name("blip_settings.json")
 # Where Blip tells blip_hook.py how to reach it: a random port and a secret token.
 ALERTS_FILE = Path(__file__).with_name("blip_alerts.json")
@@ -135,12 +136,25 @@ THROW_SPEED = 700    # let go faster than this (px/s) and Blip is thrown, not dr
 THROW_MAX = 4200     # fastest throw, px/s
 DANGER_DROP = 300    # a fall from higher than this (px) calls for a parachute or glider
 GLIDE_SPEED = 420    # thrown sideways faster than this (px/s): a glider, else a parachute
+DOOR_W, DOOR_H = 84, 140  # the door Blip arrives and leaves by, unscaled pixels
+DOOR_WALL = 14            # the wall at the screen's edge, seen side-on; Blip goes in here
+DOOR_LEAF = 62            # how far the open door reaches into the screen
+DOOR_CLEAR = 125          # Blip's middle this far from the edge is clear of the door
+DOOR_PANEL = "#3b4260"
+DOOR_PANEL_HI = "#59628a"
+DOOR_TRIM = "#232838"
+DOOR_GLOW = "#9ff6ff"
+DOOR_GLOW_DEEP = "#3fd2e6"
+ARRIVED = ["Hi! I'm here. What did I miss?", "Ta-da! Reporting for duty.",
+           "Knock knock. It's me, Blip."]
 
 ACCESSORIES = [("rotate", "Rotate (surprise me)"), ("none", "Nothing"),
                ("laptop", "Laptop"), ("phone", "Phone"), ("music", "Music player"),
                ("coffee", "Coffee mug")]
 ROTATE_POOL = ("laptop", "phone", "music", "coffee")
-SIZES = [("normal", "Normal"), ("medium", "Medium (three quarters)"), ("half", "Half size")]
+SIZES = [("half", "Tiny (half size, default)"), ("medium", "Medium (three quarters)"),
+         ("normal", "Large (full size)")]
+DEFAULT_SIZE = "half"
 SIZE_FACTORS = {"normal": 1.0, "medium": 0.75, "half": 0.5}
 CLONE_SCALE = 0.55      # a session clone is this much of Blip's size
 MAX_CLONES = 6
@@ -491,6 +505,101 @@ def raise_overlay(window):
                         NOSIZE | NOMOVE | NOACTIVATE)
 
 
+class Tray:
+    """Blip's icon in the notification area (system tray), through the Windows
+    shell API. Clicks are queued as "left" / "right" for Blip's frame loop: Tk
+    pumps this thread's window messages, so the hidden window gets them."""
+
+    WM_TRAY = 0x8000 + 7  # WM_APP + 7
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM)
+
+    class NOTIFYICONDATAW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                    ("uID", wintypes.UINT), ("uFlags", wintypes.UINT),
+                    ("uCallbackMessage", wintypes.UINT), ("hIcon", wintypes.HICON),
+                    ("szTip", wintypes.WCHAR * 128), ("dwState", wintypes.DWORD),
+                    ("dwStateMask", wintypes.DWORD), ("szInfo", wintypes.WCHAR * 256),
+                    ("uVersion", wintypes.UINT), ("szInfoTitle", wintypes.WCHAR * 64),
+                    ("dwInfoFlags", wintypes.DWORD), ("guidItem", ctypes.c_byte * 16),
+                    ("hBalloonIcon", wintypes.HICON)]
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
+                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+
+    def __init__(self, icon_path, tip, events):
+        self.events = events
+        u32, shell = ctypes.windll.user32, ctypes.windll.shell32
+        kernel = ctypes.windll.kernel32
+        u32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+                                       wintypes.LPARAM]
+        u32.DefWindowProcW.restype = ctypes.c_ssize_t
+        u32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                        wintypes.DWORD, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                                        wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p]
+        u32.CreateWindowExW.restype = wintypes.HWND
+        u32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        u32.LoadImageW.restype = wintypes.HANDLE
+        u32.DestroyWindow.argtypes = [wintypes.HWND]
+        u32.DestroyIcon.argtypes = [wintypes.HICON]
+        kernel.GetModuleHandleW.restype = wintypes.HMODULE
+        shell.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+        self.u32, self.shell = u32, shell
+        self.taskbar_created, self.hwnd = 0, None  # set below; messages arrive meanwhile
+        self.proc = self.WNDPROC(self.on_message)  # kept alive as long as the tray
+        instance = kernel.GetModuleHandleW(None)
+        wc = self.WNDCLASSW()
+        wc.lpfnWndProc = ctypes.cast(self.proc, ctypes.c_void_p)
+        wc.hInstance = instance
+        wc.lpszClassName = "BlipTrayWindow"
+        u32.RegisterClassW(ctypes.byref(wc))
+        self.hwnd = u32.CreateWindowExW(0, "BlipTrayWindow", "Blip tray", 0, 0, 0, 0, 0,
+                                        None, None, instance, None)
+        self.taskbar_created = u32.RegisterWindowMessageW("TaskbarCreated")
+        size = u32.GetSystemMetrics(49)  # SM_CXSMICON
+        self.icon = u32.LoadImageW(None, str(icon_path), 1, size, size, 0x10)  # file icon
+        self.data = self.NOTIFYICONDATAW()
+        self.data.cbSize = ctypes.sizeof(self.NOTIFYICONDATAW)
+        self.data.hWnd = self.hwnd
+        self.data.uID = 1
+        self.data.uFlags = 0x1 | 0x2 | 0x4  # message, icon, tip
+        self.data.uCallbackMessage = self.WM_TRAY
+        self.data.hIcon = self.icon
+        self.data.szTip = tip
+        self.add()
+
+    def add(self):
+        if not self.shell.Shell_NotifyIconW(0, ctypes.byref(self.data)):  # NIM_ADD
+            log.warning("the tray icon was not added")
+
+    def on_message(self, hwnd, msg, wparam, lparam):
+        if msg == self.WM_TRAY:
+            event = lparam & 0xFFFF
+            if event == 0x0202:    # WM_LBUTTONUP
+                self.events.put("left")
+            elif event == 0x0205:  # WM_RBUTTONUP
+                self.events.put("right")
+            return 0
+        if msg and msg == self.taskbar_created:
+            self.add()  # Explorer restarted: put the icon back
+            return 0
+        return self.u32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def remove(self):
+        if self.hwnd:
+            self.shell.Shell_NotifyIconW(2, ctypes.byref(self.data))  # NIM_DELETE
+            self.u32.DestroyWindow(self.hwnd)
+            if self.icon:
+                self.u32.DestroyIcon(self.icon)
+            self.hwnd = None
+
+
 def work_area():
     """Primary screen without the taskbar: (left, top, right, bottom)."""
     rect = wintypes.RECT()
@@ -704,9 +813,9 @@ class Blip:
         self.pending_alerts = []
         self.claude_working = {}  # session id -> when Claude started on a prompt
         self.lines = lines
-        self.size = parent.size if parent else load_settings().get("size", "normal")
+        self.size = parent.size if parent else load_settings().get("size", DEFAULT_SIZE)
         if self.size not in SIZE_FACTORS:
-            self.size = "normal"
+            self.size = DEFAULT_SIZE
         self.s = root.winfo_fpixels("1i") / 96 * self.size_factor()  # display scaling
         self.w, self.h = self.px(210), self.px(185)
 
@@ -749,6 +858,8 @@ class Blip:
         self.vx = 0.0           # sideways speed after being thrown, px/s
         self.trail = []         # recent (time, x, air) while dragged, to measure a throw
         self.chute, self.chute_at = None, 0.0  # "parachute" / "glider" and when it opened
+        self.door = None        # arriving or leaving through a door at a screen edge
+        self.door_win = None
         self.pivot = (self.w / 2, self.h / 2)  # grip point on the canvas
         self.swing = 0.0                        # hanging angle, radians
         self.swing_omega = 0.0
@@ -815,7 +926,14 @@ class Blip:
             self.connected.trace_add("write", lambda *_: self.syncing or self.set_connected())
             self.size_var = tk.StringVar(value=self.size)
             self.size_var.trace_add("write", lambda *_: self.resize(self.size_var.get()))
+            self.hidden = False
+            self.tray_events = queue.Queue()
             self.build_menu(root)
+            self.tray = None
+            try:
+                self.tray = Tray(ICON_FILE, "Blip", self.tray_events)
+            except Exception:
+                log.exception("could not add the tray icon")
             self.save()
         else:  # a clone: works on one Claude Code session, then merges back
             self.accessory = self.rotation = "laptop"
@@ -828,9 +946,9 @@ class Blip:
             self.syncing = False
             self.menu = tk.Menu(root, tearoff=0, font=("Segoe UI", 10))
             self.menu.add_command(label=f"Working on {task['project']}", state="disabled")
-            self.menu.add_command(label="Merge back into Blip", command=self.retire)
+            self.menu.add_command(label="Send it home", command=self.retire)
             self.go_to_screen(parent.screen)
-            self.x = parent.x + parent.w / 2 - self.w / 2
+            self.x = -1e6  # out of sight until it walks in through its door
             self.mode, self.mode_until = "rest", time.time() + 1
 
         self.canvas.bind("<ButtonPress-1>", self.on_press)
@@ -840,16 +958,27 @@ class Blip:
 
         if parent is None:
             self.lines.refill()
+            self.enter()
         self.tick()
 
     def build_menu(self, root):
-        """Right-click menu, grouped: do something / Claude Code / Blip itself."""
+        """The right-click menu, and the tray icon's: the same, with Show/Hide on top."""
+        self.menu = tk.Menu(root, tearoff=0, font=self.menu_font)
+        self.fill_menu(self.menu, root)
+        self.tray_menu = tk.Menu(root, tearoff=0, font=self.menu_font)
+        self.tray_menu.add_command(label="Hide Blip", command=self.toggle_hidden,
+                                   font=self.menu_heading)
+        self.tray_menu.add_command(label="Find Blip", command=self.find_me)
+        self.tray_menu.add_separator()
+        self.fill_menu(self.tray_menu, root)
+
+    def fill_menu(self, menu, root):
+        """Grouped: do something / Claude Code / Blip itself."""
         font, heading = self.menu_font, self.menu_heading  # sized per screen
 
         def submenu():
-            return tk.Menu(self.menu, tearoff=0, font=font)
+            return tk.Menu(menu, tearoff=0, font=font)
 
-        self.menu = tk.Menu(root, tearoff=0, font=font)
         # 1. Things Blip does for you
         drafts = submenu()
         for key, (label, _) in DRAFT_STYLES.items():
@@ -858,7 +987,7 @@ class Blip:
         drafts.add_command(label="Undo last rewrite", command=self.undo_draft)
         drafts.add_command(label=f"Tip: copy text, then press {DRAFT_HOTKEY_LABEL}",
                            state="disabled")
-        self.menu.add_cascade(label="Rewrite copied text", menu=drafts)
+        menu.add_cascade(label="Rewrite copied text", menu=drafts)
         talk = submenu()
         talk.add_command(label="Encourage me", command=lambda: self.speak("encourage"))
         talk.add_command(label="Say something funny", command=lambda: self.speak("funny"))
@@ -866,8 +995,8 @@ class Blip:
         talk.add_separator()
         talk.add_command(label="Do something random", command=self.start_antic)
         talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
-        self.menu.add_cascade(label="Talk to me", menu=talk)
-        self.menu.add_separator()
+        menu.add_cascade(label="Talk to me", menu=talk)
+        menu.add_separator()
         # 2. Claude Code
         claude = submenu()
         claude.add_checkbutton(label="Connected to Claude Code", variable=self.connected)
@@ -878,8 +1007,8 @@ class Blip:
         claude.add_command(label="What can you do with Claude Code?",
                            command=self.explain_claude)
         claude.add_command(label="Send a test alert", command=self.test_alert)
-        self.menu.add_cascade(label="Claude Code", menu=claude)
-        self.menu.add_separator()
+        menu.add_cascade(label="Claude Code", menu=claude)
+        menu.add_separator()
         # 3. Blip itself
         look = submenu()
         look.add_command(label="Accessory", state="disabled", font=heading)
@@ -889,9 +1018,9 @@ class Blip:
         look.add_command(label="Size", state="disabled", font=heading)
         for key, label in SIZES:
             look.add_radiobutton(label=label, value=key, variable=self.size_var)
-        self.menu.add_cascade(label="Look", menu=look)
-        self.menu.add_checkbutton(label="Quiet mode (no random antics)", variable=self.quiet)
-        self.menu.add_command(label="Bye, Blip (quit)", command=root.destroy)
+        menu.add_cascade(label="Look", menu=look)
+        menu.add_checkbutton(label="Quiet mode (no random antics)", variable=self.quiet)
+        menu.add_command(label="Bye, Blip (quit)", command=self.quit)
 
     def toggle_clones(self):
         self.save()
@@ -924,8 +1053,8 @@ class Blip:
         def pixels(font, points, scale, least):
             font.configure(size=-max(least, round(points * scale * 96 / 72)))
 
-        for font, points in ((self.bubble_font, 11), (self.button_font, 9),
-                             (self.tag_font, 8), (self.detail_font, 10),
+        for font, points in ((self.bubble_font, 8.5), (self.button_font, 7.5),
+                             (self.tag_font, 6), (self.detail_font, 8),
                              (self.menu_font, 10), (self.menu_heading, 9)):
             pixels(font, points, self.ui, 8)
         pixels(self.small_font, 7, self.s, 5)
@@ -1058,6 +1187,8 @@ class Blip:
             self.mood("excited", 2.5)
 
     def on_press(self, event):
+        if self.door:
+            return  # busy coming or going
         self.press = (event.x_root, event.y_root,
                       event.x_root - self.x, event.y_root - self.window_y())
 
@@ -1097,6 +1228,8 @@ class Blip:
         self.trail = [p for p in self.trail if now - p[0] < 0.12]
 
     def on_release(self, event):
+        if self.door:
+            return
         dragged, self.press, self.dragging = self.dragging, None, False
         if not dragged:
             self.on_click(event)
@@ -1279,7 +1412,7 @@ class Blip:
         if seconds is None:
             seconds = max(4.0, 2.0 + len(text) * 0.08 + len(detail or "") * 0.03)
         c, px = self.bubble_canvas, self.upx
-        pad, gap, wrap = px(14), px(8), px(268)
+        pad, gap, wrap = px(8), px(5), px(190)  # compact
         accent = accent or EYE
         c.delete("all")
         self.bubble_actions = {}
@@ -1291,7 +1424,7 @@ class Blip:
         quote = None
         if detail:
             quote = c.create_text(0, 0, text=detail, font=self.detail_font, fill=CARD_DETAIL,
-                                  width=wrap - px(12), anchor="nw", justify="left")
+                                  width=wrap - px(10), anchor="nw", justify="left")
 
         def size(item):
             x1, y1, x2, y2 = c.bbox(item)
@@ -1300,30 +1433,30 @@ class Blip:
         head_w, head_h = size(header)
         body_w, body_h = size(body)
         quote_w, quote_h = size(quote) if quote else (0, 0)
-        widths = [self.button_font.measure(name) + px(26) for name, _ in buttons]
-        button_h = px(26)
+        widths = [self.button_font.measure(name) + px(18) for name, _ in buttons]
+        button_h = px(18)
         row_w = sum(widths) + gap * (len(widths) - 1) if buttons else 0
-        content_w = max(head_w + px(30), body_w, quote_w + px(12), row_w, px(170))
+        content_w = max(head_w + px(24), body_w, quote_w + px(10), row_w, px(96))
         width = content_w + 2 * pad
 
         y = pad
-        dot = px(3.5)
+        dot = px(2.5)
         c.create_oval(pad, y + head_h / 2 - dot, pad + 2 * dot, y + head_h / 2 + dot,
                       fill=accent, outline="", tags="content")
-        c.coords(header, pad + 2 * dot + px(6), y)
+        c.coords(header, pad + 2 * dot + px(4), y)
         c.create_text(width - pad, y + head_h / 2, text="×", font=self.tag_font,
                       fill=CARD_MUTED, anchor="e", tags="content")
-        y += head_h + px(6)
+        y += head_h + px(2)
         c.coords(body, pad, y)
         y += body_h
         if quote:
             y += gap
-            c.create_rectangle(pad, y, pad + px(2.5), y + quote_h, fill=accent, outline="",
+            c.create_rectangle(pad, y, pad + px(2), y + quote_h, fill=accent, outline="",
                                tags="content")
-            c.coords(quote, pad + px(10), y)
+            c.coords(quote, pad + px(8), y)
             y += quote_h
         if buttons:
-            y += px(12)
+            y += px(8)
             bx = pad
             for i, ((name, action), bw) in enumerate(zip(buttons, widths)):
                 tag_id = f"btn{i}"
@@ -1346,7 +1479,7 @@ class Blip:
         card_h = y + pad
 
         self.card_size = (width, card_h)
-        self.bubble_size = (width + px(4), card_h + px(10) + px(4))
+        self.bubble_size = (width + px(4), card_h + px(7) + px(4))
         c.config(width=self.bubble_size[0], height=self.bubble_size[1])
         self.bubble_until = now + seconds
         self.bubble_shown_at = now
@@ -1365,7 +1498,7 @@ class Blip:
         c, px = self.bubble_canvas, self.upx
         width, height = self.bubble_size
         card_w, card_h = self.card_size
-        tail, r = px(10), px(14)
+        tail, r = px(7), px(9)
         left, top, right, _ = self.area()
         center = int(self.x) + self.w // 2
         fade = min(1.0, (time.time() - self.bubble_shown_at) / 0.18)
@@ -1515,6 +1648,250 @@ class Blip:
                       side="right", padx=(0, 8))
         win.focus_force()
 
+    # -- doors: arriving and leaving
+
+    def enter(self, side=None, stop_x=None, then=None):
+        """Walk in through a door that opens at the left (-1) or right (+1) edge."""
+        side = side or random.choice((-1, 1))
+        left, _, right, _ = self.area()
+        edge = left if side < 0 else right
+        inward = -side
+        self.x = edge - inward * self.px(55) - self.w / 2  # just behind the doorway
+        if stop_x is None:
+            stop_x = edge + inward * self.px(DOOR_CLEAR + random.uniform(20, 140)) - self.w / 2
+        self.direction = inward
+        self.start_door("in", side, edge, stop_x, then)
+
+    def leave(self, then=None, side=None):
+        """Walk to the nearer screen edge, where a door opens, and go through it."""
+        if self.door and self.door["kind"] == "out":
+            return
+        left, _, right, _ = self.area()
+        centre = self.x + self.w / 2
+        if side is None:
+            side = -1 if centre - left < right - centre else 1
+        edge = left if side < 0 else right
+        self.direction = side
+        stop_x = edge + side * self.px(55) - self.w / 2  # through and out of sight
+        self.start_door("out", side, edge, stop_x, then)
+
+    def start_door(self, kind, side, edge, stop_x, then):
+        self.hush()
+        self.act = None if self.act != "wait" else self.act
+        self.press, self.dragging, self.leap = None, False, None
+        self.air, self.vx, self.chute = 0.0, 0.0, None
+        distance = abs(stop_x - self.x)
+        self.door = {"kind": kind, "side": side, "edge": float(edge), "stop": float(stop_x),
+                     "then": then, "phase": "appear", "at": time.time(),
+                     "walked": False, "speed": max(WALK_SPEED * 2 * self.s, distance / 2.4)}
+        if self.door_win is None:
+            self.door_win = tk.Toplevel(self.root)
+            make_overlay(self.door_win)
+            self.door_canvas = tk.Canvas(self.door_win, bg=TRANSPARENT, highlightthickness=0)
+            self.door_canvas.pack()
+        dw, dh = self.px(DOOR_W), self.px(DOOR_H)
+        self.door_canvas.configure(width=dw, height=dh)
+        x = int(edge) if side < 0 else int(edge) - dw
+        self.door_win.geometry(f"{dw}x{dh}+{x}+{self.area()[3] - dh}")
+        self.door_win.deiconify()
+        raise_overlay(self.door_win)
+        raise_overlay(self.root)  # Blip walks in front of the door
+
+    def door_step(self, now):
+        """Run the door and the walk through it. True while Blip is walking."""
+        d = self.door
+        t = now - d["at"]
+        timings = {"appear": 0.3, "open": 0.35, "close": 0.35, "vanish": 0.3}
+        nxt = {"appear": "open", "open": "hold", "close": "vanish", "vanish": "gone"}
+        if d["phase"] in timings and t >= timings[d["phase"]]:
+            d["phase"], d["at"], t = nxt[d["phase"]], now, 0.0
+        walking = False
+        if not d["walked"] and (d["kind"] == "out" or d["phase"] not in ("appear", "open")):
+            going = 1 if d["stop"] > self.x else -1
+            step = min(abs(d["stop"] - self.x), d["speed"] * self.FRAME_MS / 1000)
+            if d["kind"] == "out" and d["phase"] != "hold":
+                # don't walk into a door that isn't open yet
+                gap = abs(self.x + self.w / 2 - d["edge"]) - self.px(DOOR_CLEAR)
+                step = min(step, max(0.0, gap))
+            if step > 0:
+                self.direction = going
+                self.x += going * step
+                self.gait = (self.gait + step / (2 * STRIDE * self.s)) % 1
+                self.step = self.gait * 2 * math.pi
+                walking = True
+            if abs(d["stop"] - self.x) < 0.5:
+                d["walked"] = True
+        clear = abs(self.x + self.w / 2 - d["edge"]) > self.px(DOOR_CLEAR)
+        if d["phase"] == "hold" and (d["walked"] if d["kind"] == "out"
+                                     else clear or d["walked"]):
+            d["phase"], d["at"], t = "close", now, 0.0
+        if d["phase"] == "gone":
+            if self.door_win is not None:
+                self.door_win.withdraw()
+            if d["walked"]:
+                self.door = None
+                if d["kind"] == "in" and self.parent is None and random.random() < 0.6:
+                    self.say(random.choice(ARRIVED), seconds=4)
+                if d["then"]:
+                    d["then"]()
+            return walking
+        self.draw_door(now, d, t)
+        if self.frame % 15 == 0:
+            raise_overlay(self.root)
+        return walking
+
+    def draw_door(self, now, d, t):
+        """A door in a wall at the screen's bottom corner, seen from the side. The
+        wall slides out of the edge, the door swings open into the screen (turning
+        its face to you) onto a glowing way through, then shuts and slides back."""
+        c, s = self.door_canvas, self.s
+        c.delete("all")
+        dw, dh = self.px(DOOR_W), self.px(DOOR_H)
+        phase = d["phase"]
+        show = {"appear": min(1.0, t / 0.3), "vanish": max(0.0, 1 - t / 0.3)}.get(phase, 1.0)
+        show = 1 - (1 - show) ** 2
+        opened = {"appear": 0.0, "open": min(1.0, t / 0.4), "hold": 1.0,
+                  "close": max(0.0, 1 - t / 0.35), "vanish": 0.0}[phase]
+        opened = 0.5 - 0.5 * math.cos(math.pi * opened)
+        slide = (1 - show) * dw
+
+        def X(x):  # x measured inward from the screen's edge
+            x = x - slide
+            return x if d["side"] < 0 else dw - x
+        lw = max(1, self.px(1.5))
+        wall, floor = DOOR_WALL * s, dh - 1 * s
+        wall_top, door_top = 4 * s, 22 * s
+        # light: a glowing gap in the wall, a beam and a pool on the floor
+        if opened > 0.02:
+            beam = DOOR_LEAF * s * 1.2 * opened
+            c.create_polygon(X(wall), door_top + 4 * s, X(wall + beam), floor,
+                             X(wall), floor, outline="",
+                             fill=mix("#dff9fc", DOOR_GLOW, 0.35))
+            c.create_polygon(X(wall), floor - 3 * s, X(wall + beam * 1.25), floor - 0.5 * s,
+                             X(wall + beam * 1.25), floor, X(wall), floor, outline="",
+                             fill=mix(DOOR_GLOW_DEEP, DOOR_GLOW, 0.5))
+        # the wall at the screen's edge, cut through by the doorway
+        c.create_rectangle(X(0), wall_top, X(wall), floor, fill=DOOR_TRIM,
+                           outline=OUTLINE, width=lw)
+        gap = mix(SCREEN, DOOR_GLOW, opened)
+        c.create_rectangle(X(wall * 0.18), door_top, X(wall * 0.82), floor, fill=gap,
+                           outline="")
+        if opened > 0.3:
+            c.create_rectangle(X(wall * 0.35), door_top + 4 * s, X(wall * 0.65), floor,
+                               fill=mix(gap, "#ffffff", 0.5 * opened), outline="")
+        c.create_line(X(wall), wall_top, X(wall), floor, fill=OUTLINE, width=lw)
+        c.create_rectangle(X(-2 * s), wall_top - 4 * s, X(wall + 4 * s), wall_top + 3 * s,
+                           fill=DOOR_PANEL, outline=OUTLINE, width=lw)  # a cap on the wall
+        # a lamp over the door, blinking while it's in use
+        lit = ACCENT if phase in ("open", "hold") and int(now * 4) % 2 else ACCENT_DIM
+        lx, ly = X(wall + 4 * s), door_top - 6 * s
+        c.create_line(X(wall), ly, lx, ly, fill=DOOR_TRIM, width=max(2, self.px(2)))
+        c.create_oval(lx - 3.5 * s, ly - 3.5 * s, lx + 3.5 * s, ly + 3.5 * s, fill=lit,
+                      outline=OUTLINE, width=1)
+        # the door, hinged at the wall's inner face: edge-on when shut, then
+        # swinging into the screen until its whole face shows
+        reach = DOOR_LEAF * s * math.sin(opened * math.pi / 2)
+        thick = 3.5 * s
+        x1, x2 = wall - thick * (1 - opened), wall + max(reach, thick * opened)
+        c.create_rectangle(X(x1), door_top, X(x2), floor, outline=OUTLINE, width=lw,
+                           fill=mix(DOOR_PANEL, DOOR_PANEL_HI, 0.45 * opened))
+        if reach > 12 * s:  # its face: two panels, a knob and a little window
+            span = x2 - x1
+            for y1, y2 in ((0.08, 0.4), (0.5, 0.92)):
+                c.create_rectangle(X(x1 + span * 0.16), door_top + (floor - door_top) * y1,
+                                   X(x1 + span * 0.84), door_top + (floor - door_top) * y2,
+                                   fill=DOOR_PANEL_HI, outline=DOOR_TRIM, width=1)
+            wy = door_top + (floor - door_top) * 0.2
+            c.create_oval(X(x1 + span * 0.5) - span * 0.14, wy - 6 * s,
+                          X(x1 + span * 0.5) + span * 0.14, wy + 6 * s,
+                          fill=mix(DOOR_GLOW_DEEP, SCREEN, 0.3), outline=DOOR_TRIM)
+            ky = door_top + (floor - door_top) * 0.47
+            kx = X(x1 + span * 0.86)
+            c.create_oval(kx - 2.5 * s, ky - 2.5 * s, kx + 2.5 * s, ky + 2.5 * s,
+                          fill=ACCENT, outline=OUTLINE)
+
+    def mask_door(self):
+        """Hide the part of Blip that has gone through the doorway."""
+        d = self.door
+        if not d:
+            return
+        line = d["edge"] - d["side"] * self.px(DOOR_WALL) - int(self.x)
+        if d["side"] < 0 and line > 0:
+            self.canvas.create_rectangle(-5, -5, line, self.h + 5, fill=TRANSPARENT,
+                                         outline=TRANSPARENT)
+        elif d["side"] > 0 and line < self.w:
+            self.canvas.create_rectangle(line, -5, self.w + 5, self.h + 5, fill=TRANSPARENT,
+                                         outline=TRANSPARENT)
+
+    def quit(self):
+        """Say bye and leave through a door, then close."""
+        if self.door and self.door["kind"] == "out":
+            return
+        if self.hidden:
+            self.close()
+            return
+        for clone in list(self.clones.values()):
+            clone.retire()
+        self.say(random.choice(["Bye! See you soon.", "Off I go!", "Logging off. Wave!"]),
+                 seconds=1.5)
+        self.root.after(600, lambda: self.leave(then=self.close))
+
+    def take_tray(self):
+        """Clicks on the tray icon: left shows (or greets), right opens the menu."""
+        while True:
+            try:
+                event = self.tray_events.get_nowait()
+            except queue.Empty:
+                return
+            if event == "left":
+                self.find_me()
+            elif event == "right":
+                self.root.after(0, self.tray_popup)
+
+    def tray_popup(self):
+        self.tray_menu.entryconfigure(0, label="Show Blip" if self.hidden else "Hide Blip")
+        user32.SetForegroundWindow(hwnd_of(self.root))  # so an outside click closes it
+        x, y = self.root.winfo_pointerxy()
+        self.menu_open = True
+        try:
+            self.tray_menu.tk_popup(x, y)
+        finally:
+            self.tray_menu.grab_release()
+            self.menu_open = False
+
+    def find_me(self):
+        if self.hidden:
+            self.toggle_hidden()
+        elif not self.door:
+            self.jump()
+            self.mood("excited", 2)
+            self.say(random.choice(["Here I am!", "Right here!", "You called?"]), seconds=3)
+
+    def toggle_hidden(self):
+        """Hide: walk out through a door. Show: come back in through one."""
+        if self.door:
+            return
+        if self.hidden:
+            self.hidden = False
+            self.root.deiconify()
+            self.enter()
+        else:
+            self.leave(then=self.hide_now)
+
+    def hide_now(self):
+        self.hidden = True
+        self.hush()
+        self.root.withdraw()
+
+    def close(self):
+        if getattr(self, "tray", None):
+            self.tray.remove()
+        self.alive = False
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
     # -- antics
 
     def start_antic(self):
@@ -1577,6 +1954,7 @@ class Blip:
         return (not self.quiet.get() and self.act is None and not self.bubble_until
                 and not self.menu_open and self.jump_started is None
                 and not self.dragging and self.air == 0 and not self.vx and not self.leap
+                and not self.door
                 and now > self.next_antic)
 
     # -- animation
@@ -2723,18 +3101,16 @@ class Blip:
         window = tk.Toplevel(self.root)
         clone = Blip(window, self.lines, parent=self, task=task)
         self.clones[sid] = clone
-        # Pop out of Blip and land in a free spot beside it.
+        # Walk in through a door at the nearer edge to a free spot beside Blip.
         slot = len(self.clones)
         side = 1 if slot % 2 else -1
         left, _, right, _ = self.area()
         centre = self.x + self.w / 2
         target = centre + side * (self.w * 0.45 + ((slot + 1) // 2) * clone.w * 0.95)
         target = min(max(target - clone.w / 2, left), right - clone.w)
-        clone.x = centre - clone.w / 2
-        task["from"], task["to"] = clone.x, float(target)
-        clone.direction = side
-        clone.jump_started = time.time()
-        self.jump()
+        task["to"] = float(target)
+        edge = -1 if target + clone.w / 2 - left < right - target - clone.w / 2 else 1
+        clone.enter(side=edge, stop_x=float(target), then=clone.arrived)
         self.mood("excited", 1.5)
 
     def task_tag(self):
@@ -2747,7 +3123,7 @@ class Blip:
         took = "under a minute" if minutes < 1 else f"{minutes} min"
         if self.task["state"] in ("spawning", "working"):
             return f"Working with Claude on {self.task['project']} ({took} so far)."
-        return f"{self.task['project']} is done. Merging back into Blip soon."
+        return f"{self.task['project']} is done. Heading out soon."
 
     def task_event(self, event):
         """An event for this clone's session."""
@@ -2769,8 +3145,16 @@ class Blip:
         elif kind in ("SessionEnd", "SessionStart"):
             self.retire()
 
+    def arrived(self):
+        task = self.task
+        if task["state"] != "spawning":
+            return  # sent home while it was still walking in
+        task["state"], task["since"] = "working", time.time()
+        self.say(random.choice(CLONE_SPLIT).format(project=task["project"]),
+                 seconds=4, tag=self.task_tag(), accent=ACCENT)
+
     def retire(self):
-        """Head back to Blip and merge."""
+        """Head out through a door."""
         if self.task["state"] != "merging":
             self.task["state"], self.task["since"] = "merging", time.time()
             self.hush()
@@ -2782,14 +3166,7 @@ class Blip:
         if not parent.alive:
             return self.vanish()
         if state == "spawning":
-            if "to" not in task:
-                return True  # the first frame, before Blip picked a spot
-            t = min(1.0, age / 0.6)
-            self.x = task["from"] + (task["to"] - task["from"]) * t
-            if t >= 1:
-                task["state"], task["since"] = "working", now
-                self.say(random.choice(CLONE_SPLIT).format(project=task["project"]),
-                         seconds=4, tag=self.task_tag(), accent=ACCENT)
+            return True  # walking in through its door
         elif state == "working":
             self.mode, self.mode_until = "rest", now + 1  # sit and type
             if now - task["started"] > 30 * 60:
@@ -2800,24 +3177,10 @@ class Blip:
                 self.retire()
         elif state == "merging":
             self.mode, self.mode_until = "rest", now + 1
-            target = parent.x + parent.w / 2 - self.w / 2
-            close = abs(target - self.x) < parent.w * 0.2
-            if close or parent.screen != self.screen or age > 15:
-                parent.jump()
-                parent.mood("love", 2)
-                return self.vanish()
-        return True
-
-    def scurry(self, now):
-        """While merging, hurry back toward Blip. True while walking."""
-        if self.task["state"] != "merging" or self.dragging or self.air or self.leap:
-            return False
-        target = self.parent.x + self.parent.w / 2 - self.w / 2
-        self.direction = 1 if target > self.x else -1
-        distance = min(abs(target - self.x), 260 * self.s * self.FRAME_MS / 1000)
-        self.x += self.direction * distance
-        self.gait = (self.gait + distance / (2 * STRIDE * self.s)) % 1
-        self.step = self.gait * 2 * math.pi
+            if not self.door and not self.dragging and self.air == 0:
+                self.leave(then=self.vanish)
+            elif age > 40:
+                return self.vanish()  # stuck somehow: just go
         return True
 
     def vanish(self):
@@ -2832,6 +3195,10 @@ class Blip:
 
     def frame_step(self):
         now = time.time()
+        if self.parent is None:
+            self.take_tray()
+            if self.hidden or not self.alive:
+                return  # out through the door; the tray icon brings Blip back
         if self.parent:
             if not self.clone_step(now):
                 return  # merged back
@@ -2874,10 +3241,14 @@ class Blip:
         if self.antic_due(now):
             self.start_antic()
 
-        walking = self.move(now)
-        if self.parent:
-            walking = self.scurry(now) or walking
+        if self.door:
+            walking = self.door_step(now)
+            if not self.alive:
+                return  # left for good
+        else:
+            walking = self.move(now)
         self.draw(now, walking)
+        self.mask_door()
         x, y = int(self.x), self.window_y()
         if self.act == "glitch":
             x += random.randint(-3, 3)
