@@ -147,7 +147,8 @@ How it works:
 
 ## Screens
 
-Blip walks along the bottom of every screen, just above the taskbar. At an edge shared
+Blip walks along the bottom of every screen, just above the taskbar, turned three-quarters
+toward where it's going (it turns back to face you when it stops). At an edge shared
 with another screen it leaps across and lands on that screen's floor; at an outer edge it
 hops and turns around. You can also drag it onto another screen. It resizes to match each
 screen's display scaling, and notices screens being plugged in or rearranged.
