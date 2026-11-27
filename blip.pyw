@@ -47,7 +47,7 @@ ICON_FILE = Path(__file__).with_name("blip.ico")
 
 # Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
 # v<VERSION>; every Blip finds it, downloads it and installs it.
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 UPDATE_REPO = "pramodkumar3901/Desktop_Assistant"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_FIRST_CHECK = 45        # seconds after starting
@@ -1674,6 +1674,8 @@ class Blip:
         self.lines.restyle(humour)
         self.save()
         self.speak("funny")  # a taste of the new style
+
+    def say_kind(self, kind):
         """Say a line nobody asked for: Claude's if one is ready, else a canned one."""
         self.say(self.lines.take(kind, wait=False) or random.choice(FALLBACK[kind]),
                  tag=KIND_TAGS.get(kind, "Blip"))
