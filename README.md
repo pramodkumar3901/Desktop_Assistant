@@ -8,8 +8,9 @@ assistants of the 90s. It wants very badly to help and almost never does.
 draft rewrite on its laptop, then splitting off a mini Blip for a second Claude Code
 session that reports back and merges in](docs/blip-demo.gif)
 
-**Start and stop:** double-click `blip.pyw` to start it, or right-click Blip and choose
-**Bye, Blip (quit)** to close it. `blip_control.pyw` does the rest:
+**Start and stop:** double-click **`Start Blip.cmd`** (or `blip.pyw`). Blip walks in through a
+door that opens in a bottom corner of the screen. Right-click Blip and choose **Bye, Blip
+(quit)** and it walks out through a door before closing. `blip_control.pyw` does the rest:
 
 | Command | Does |
 | --- | --- |
@@ -20,6 +21,12 @@ session that reports back and merges in](docs/blip-demo.gif)
 
 For one-click shortcuts, make a Windows shortcut to each command (right-click in the
 folder → New → Shortcut, and paste the command with the full path to `blip_control.pyw`).
+
+**Tray icon:** Blip puts its robot face in the notification area (the icons by the clock;
+it may be in the overflow arrow, and you can drag it out). Left-click it to find Blip (or bring
+it back). Right-click it for **Hide Blip / Show Blip** (it leaves or returns through a door),
+**Find Blip** and the same menu as right-clicking Blip. The icon is `blip.ico`, drawn by
+`tools/make_icon.py`.
 
 | You do | Blip does |
 | --- | --- |
@@ -122,11 +129,11 @@ Code in the terminal and in the desktop app (both read the same settings). Once 
   too: `python blip_say.py "Lunch!"`.
 
 **Mini Blips (one per session).** When more than one session is working at once, Blip
-takes the first and pops out a small clone of itself for each extra one (up to 6). A
-clone sits beside Blip typing on its laptop; click it to see its project and how long
+takes the first and calls in a small clone of itself for each extra one (up to 6), which
+walks in through a door at the nearer corner. A clone sits beside Blip typing on its laptop; click it to see its project and how long
 it's been working. When its session needs you, the clone waves its phone. When the
-session finishes, the clone tells you, hangs around for a few seconds, then hurries back
-and merges into Blip. Right-click a clone to send it back early. Turn the feature off
+session finishes, the clone tells you, hangs around for a few seconds, then walks out
+through a door at the nearer corner. Right-click a clone to send it home early. Turn the feature off
 with **Claude Code → A mini Blip for each extra session**; Blip then reports every
 session itself.
 
