@@ -739,6 +739,7 @@ class Blip:
         self.menu_open = False
         self.head_y = self.h * 0.4
         self.tilt = 0.0
+        self.turn = 0.0         # 0 = facing you, 1 = turned three-quarters to walk
         self.press = None       # where a left-button press started
         self.dragging = False
         self.drag_lean = 0.0
@@ -1757,6 +1758,15 @@ class Blip:
         if self.jump_started is not None:
             stretch = 0.18 * abs(1 - 2 * min(1.0, (now - self.jump_started) / 0.6))
         self.tilt += (self.target_tilt(now, t, walking) - self.tilt) * 0.25
+        # While it travels, Blip turns three-quarters toward where it's going, and
+        # turns back to face you when it stops. Everything below is drawn as if
+        # rotated about the vertical axis by `yaw`.
+        side_on = (walking or act in ("moonwalk", "skate")) and not airborne
+        self.turn += ((1.0 if side_on else 0.0) - self.turn) * 0.14
+        yaw = math.radians(50) * self.turn * self.direction
+        cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+        turned = abs(sin_y) > 0.05
+        near = -1 if sin_y > 0 else 1  # the side (cup, leg) turned toward you
 
         # The window sits on whole pixels; carry the fraction so planted feet stay still.
         cx = self.w / 2 + sway + (self.x - int(self.x))
@@ -1787,12 +1797,15 @@ class Blip:
         # legs and chunky feet
         body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s
         body_top = body_bottom - 19 * s + breathe * 0.6 * s
-        bx1, bx2 = cx - 20 * s, cx + 20 * s
+        body_half = 20 * s * cos_y + 13 * s * abs(sin_y)  # a box 40 wide, 26 deep
+        bx1, bx2 = cx - body_half, cx + body_half
+        front_x = cx + 13 * s * sin_y  # middle of the hip piece's front face
         if self.chute:
             self.draw_chute(c, now, cx, body_top, front=False)
         stride = STRIDE * s
         moonwalk = act == "moonwalk"
-        for i, side in enumerate((-1, 1)):
+        for side in ((-near, near) if turned else (-1, 1)):  # far leg first
+            i = 0 if side < 0 else 1
             lift, tiptoe = 0.0, False
             if moonwalk:
                 # Run the walk backwards: the foot that holds still in the world is
@@ -1821,8 +1834,8 @@ class Blip:
                     lift = max(0.0, math.sin(t * 7) * side) * 6 * s
                 elif airborne:  # little legs dangling and kicking
                     lift = (math.sin(now * 7 + side * 1.6) + 1) * 2 * s
-            hip_x = cx + side * 12 * s
-            fx = cx + side * 14 * s + self.foot_off[i]
+            hip_x = cx + side * 12 * s * cos_y
+            fx = cx + side * 14 * s * cos_y + self.foot_off[i]
             knee_y = ground - 9 * s - lift - (5 * s if tiptoe else 0)
             c.create_line(hip_x, body_bottom - 2 * s, fx, knee_y, fill=OUTLINE,
                           width=max(6, self.px(13)), capstyle="round")
@@ -1846,11 +1859,11 @@ class Blip:
                       capstyle="round")
         for row in range(2):
             for col in range(3):
-                gx = cx - 11 * s + col * 4.5 * s
+                gx = front_x + (-11 * s + col * 4.5 * s) * cos_y
                 gy = body_top + 9 * s + row * 4.5 * s
                 c.create_oval(gx - 1.3 * s, gy - 1.3 * s, gx + 1.3 * s, gy + 1.3 * s,
                               fill=OUTLINE, outline="")
-        c.create_oval(cx - 21 * s, body_top - 3 * s, cx + 21 * s, body_top + 6 * s,
+        c.create_oval(bx1 - 1 * s, body_top - 3 * s, bx2 + 1 * s, body_top + 6 * s,
                       fill=mix(SHELL, "#000000", 0.45), outline="")
         if act == "glitch":
             light = random.choice(GLITCH_COLORS)
@@ -1860,7 +1873,7 @@ class Blip:
             light = ACCENT_DIM
         else:
             light = ACCENT if now % 2.4 < 1.8 else ACCENT_DIM
-        lx, ly = cx + 10 * s, body_top + 11 * s
+        lx, ly = front_x + 10 * s * cos_y, body_top + 11 * s
         c.create_oval(lx - 4 * s, ly - 4 * s, lx + 4 * s, ly + 4 * s, fill=OUTLINE, outline="")
         c.create_oval(lx - 2.6 * s, ly - 2.6 * s, lx + 2.6 * s, ly + 2.6 * s,
                       fill=light, outline="")
@@ -1876,7 +1889,10 @@ class Blip:
         angle = math.radians(self.tilt)
         cos_a, sin_a, pivot_x, pivot_y = math.cos(angle), math.sin(angle), cx, hy2
 
+        layer = [1.0, 0.0]  # horizontal squash and shift of the plane being drawn
+
         def R(x, y):
+            x = cx + (x - cx) * layer[0] + layer[1]
             dx, dy = x - pivot_x, y - pivot_y
             return pivot_x + dx * cos_a - dy * sin_a, pivot_y + dx * sin_a + dy * cos_a
 
@@ -1891,6 +1907,8 @@ class Blip:
         band_r = hw / 2 + 9 * s           # lines up with the middle of each cup
         band_y = cup_y - 17 * s           # where the band meets the sliders
         band_rise = band_y - (hy1 - 12 * s)
+
+        layer[:] = [cos_y, 0.0]  # the band runs over the middle of the head
 
         def arc_points(lift, start=0, end=16, radius=None):
             radius = band_r if radius is None else radius
@@ -1912,7 +1930,12 @@ class Blip:
                       smooth=True, fill=mix(BAND_PAD, "#ffffff", 0.12),
                       width=max(1, self.px(1.2)), capstyle="round")
 
+        head_base = c.create_rectangle(0, 0, 0, 0, outline="")  # far cup goes below this
+        # The shell's outline grows as its side comes into view (depth 0.6 of width);
+        # the bezel and screen are on the front face, narrowed and shifted toward it.
+        layer[:] = [cos_y + 0.6 * abs(sin_y), 0.0]
         shaded(box, hx1, hy1, hx2, hy2, 16 * s, shell, SHELL_HI, outline=OUTLINE)
+        layer[:] = [cos_y, 0.27 * hw * sin_y]
         box(hx1 + 3.5 * s, hy1 + 3.5 * s, hx2 - 3.5 * s, hy2 - 3.5 * s, 13 * s,
             fill=BEZEL_DARK, outline="")
         box(hx1 + 3.5 * s, hy1 + 3.5 * s, hx2 - 3.5 * s, hy2 - 5.5 * s, 13 * s,
@@ -1930,7 +1953,10 @@ class Blip:
         # Headphones, part 2: over-ear cups seen edge-on from the front. Each has a
         # soft cushion against the head, a graphite shell, an orange outer cap, and a
         # metal slider coming down from the band to a pivot in the cup's middle.
-        for side in (-1, 1):
+        cup_at = [None]
+
+        def draw_cup(side):
+            layer[:] = [cos_y, 0.0]
             inner = cx + side * (hw / 2 - 1 * s)
 
             def span(a, b):  # x range from a to b units outward, either side
@@ -1949,6 +1975,15 @@ class Blip:
                 outline=OUTLINE, width=1)
             box(x1 + 0.6 * s, cup_y - 10 * s, x2 - 0.6 * s, cup_y - 3 * s, 1 * s,
                 fill=PHONE_LIGHT, outline="")
+            if turned and side == near:  # the cup's round outer face, seen at an angle
+                fx_, fy_ = R(inner + side * 15.5 * s, cup_y)
+                half = 14 * s * abs(sin_y)
+                c.create_oval(fx_ - half, fy_ - 14 * s, fx_ + half, fy_ + 14 * s,
+                              fill=CUP, outline=OUTLINE, width=lw)
+                c.create_oval(fx_ - half * 0.68, fy_ - 9.5 * s, fx_ + half * 0.68,
+                              fy_ + 9.5 * s, fill=ACCENT, outline=OUTLINE, width=1)
+                c.create_oval(fx_ - half * 0.45, fy_ - 8 * s, fx_ - half * 0.05,
+                              fy_ - 3 * s, fill=PHONE_LIGHT, outline="")
             bar_x = cx + side * band_r
             c.create_line(*R(bar_x, band_y - 1 * s), *R(bar_x, cup_y), fill=OUTLINE,
                           width=max(4, self.px(4.5)), capstyle="round")
@@ -1958,7 +1993,20 @@ class Blip:
             c.create_oval(px_ - 2.6 * s, py_ - 2.6 * s, px_ + 2.6 * s, py_ + 2.6 * s,
                           fill=SLIDER, outline=OUTLINE)
             if side < 0:
-                cup = R(cx - band_r, cup_y + 15.5 * s)  # the music player's cable plugs in here
+                cup_at[0] = R(cx - band_r, cup_y + 15.5 * s)  # the music player's cable
+            layer[:] = [1.0, 0.0]
+
+        if turned:  # the far cup sits behind the head, the near one in front
+            last = c.find_all()[-1]
+            draw_cup(-near)
+            for item in c.find_all():
+                if item > last:
+                    c.tag_lower(item, head_base)
+            draw_cup(near)
+        else:
+            draw_cup(-1)
+            draw_cup(1)
+        cup = cup_at[0]
 
         self.head_y = band_y - band_rise - 5 * s
         self.draw_prop(c, now, cx, bx1, bx2, body_top, cup, ground, walking)
