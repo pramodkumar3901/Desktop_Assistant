@@ -140,7 +140,9 @@ ACCESSORIES = [("rotate", "Rotate (surprise me)"), ("none", "Nothing"),
                ("laptop", "Laptop"), ("phone", "Phone"), ("music", "Music player"),
                ("coffee", "Coffee mug")]
 ROTATE_POOL = ("laptop", "phone", "music", "coffee")
-SIZES = [("normal", "Normal"), ("medium", "Medium (three quarters)"), ("half", "Half size")]
+SIZES = [("half", "Tiny (half size, default)"), ("medium", "Medium (three quarters)"),
+         ("normal", "Large (full size)")]
+DEFAULT_SIZE = "half"
 SIZE_FACTORS = {"normal": 1.0, "medium": 0.75, "half": 0.5}
 CLONE_SCALE = 0.55      # a session clone is this much of Blip's size
 MAX_CLONES = 6
@@ -704,9 +706,9 @@ class Blip:
         self.pending_alerts = []
         self.claude_working = {}  # session id -> when Claude started on a prompt
         self.lines = lines
-        self.size = parent.size if parent else load_settings().get("size", "normal")
+        self.size = parent.size if parent else load_settings().get("size", DEFAULT_SIZE)
         if self.size not in SIZE_FACTORS:
-            self.size = "normal"
+            self.size = DEFAULT_SIZE
         self.s = root.winfo_fpixels("1i") / 96 * self.size_factor()  # display scaling
         self.w, self.h = self.px(210), self.px(185)
 

@@ -37,7 +37,7 @@ The right-click menu, in three groups:
 | **Rewrite copied text** | Improve it, Make it shorter, More professional, Friendlier, Fix grammar only, Undo last rewrite |
 | **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random |
 | **Claude Code** | Connected to Claude Code, Show alerts, A mini Blip for each extra session, What can you do?, Send a test alert |
-| **Look** | Accessory (Rotate, Nothing, Laptop, Phone, Music player, Coffee mug) and Size (Normal, Medium, Half) |
+| **Look** | Accessory (Rotate, Nothing, Laptop, Phone, Music player, Coffee mug) and Size (Tiny, the default; Medium; Large) |
 | **Quiet mode** | No random antics |
 | **Bye, Blip (quit)** | Closes Blip |
 
