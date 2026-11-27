@@ -26,6 +26,7 @@ folder → New → Shortcut, and paste the command with the full path to `blip_c
 | Move the mouse close | Stops, turns its eyes and head toward it (and wakes up if napping). Stay a while and it gets heart eyes |
 | Click Blip | Jumps and encourages you |
 | Drag Blip | Hangs from where you grabbed it and swings as you move it, legs dangling; let go and it falls, lands and is dizzy |
+| Throw Blip | Flick it as you let go and it flies, bouncing off the screen edges. If the fall gets dangerous it opens a **parachute**, or a **hang-glider** when it's flying sideways fast, and lands safely; a low throw makes it skid |
 | Right-click Blip | The menu below |
 | Click a speech card | Closes it (buttons do their own thing) |
 
@@ -81,6 +82,7 @@ Every 25–70 seconds it does something on its own:
 - **Installs a pointless update** (with a progress bar)
 - **Loads** with spinning eyes
 - **Rides a skateboard** across the screen
+- **Moonwalks**: faces one way and glides the other, up on its toes (also in **Talk to me → Moonwalk for me**)
 - **Pulls a face** (heart eyes, a wink, a scowl, tears...) and sometimes explains it
 - **Offers help nobody asked for**: "It looks like you're...", with
   **Yes please!** and **No thanks** buttons
