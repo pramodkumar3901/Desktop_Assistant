@@ -33,6 +33,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import font as tkfont
 
+import blip_skills
+
 MODEL = os.environ.get("BLIP_MODEL", "claude-opus-5-5")
 LINES_PER_KIND = 4
 REACTION_LINES = 3       # per reaction (after a moonwalk, a landing...): heard less often
@@ -44,6 +46,10 @@ BACKGROUND_GAP = 10 * 60 # antics alone never ask Claude more often than this
 ANTIC_GAP = (25, 70)     # seconds between random antics
 LOG_FILE = Path(__file__).with_name("blip.log")
 ICON_FILE = Path(__file__).with_name("blip.ico")
+SKILLS_DIR = Path(__file__).with_name("skills")        # the skills that come with Blip
+MY_SKILLS_DIR = Path(__file__).with_name("my_skills")  # yours; updates leave them alone
+SKILL_SCAN = 2.0         # seconds between looks for new or edited skill files
+SKILL_WAIT = 10 * 60     # a triggered skill that can't run for this long is dropped
 
 # Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
 # v<VERSION>; every Blip finds it, downloads it and installs it.
@@ -231,6 +237,9 @@ DRAFT_STYLES = {
 }
 DRAFT_MAX_CHARS = 12000
 DRAFT_HOTKEY_LABEL = "Ctrl+Alt+I"
+HIDE_HOTKEY_LABEL = "Ctrl+Alt+Q"
+# Global hotkeys, all Ctrl+Alt plus a letter: (letter, what is queued, label)
+HOTKEYS = [("I", "improve", DRAFT_HOTKEY_LABEL), ("Q", "toggle", HIDE_HOTKEY_LABEL)]
 EDITOR_PROMPT = (
     "You are a careful writing editor. Rewrite the draft between <draft> tags following "
     "the instruction. Keep the author's language, voice, meaning, names, numbers, links and "
@@ -462,16 +471,23 @@ def rewrite_with_claude(text, instruction):
 
 
 def start_hotkey(hotkeys):
-    """Ctrl+Alt+I anywhere: improve the text on the clipboard."""
+    """Listen anywhere in Windows: Ctrl+Alt+I improves the text on the clipboard,
+    Ctrl+Alt+Q hides Blip or brings it back."""
     def run():
         MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x0312
-        if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("I")):
-            log.warning("could not register %s (another app may use it)", DRAFT_HOTKEY_LABEL)
+        actions = {}
+        for number, (key, action, label) in enumerate(HOTKEYS, 1):
+            if user32.RegisterHotKey(None, number,
+                                     MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord(key)):
+                actions[number] = action
+            else:
+                log.warning("could not register %s (another app may use it)", label)
+        if not actions:
             return
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_HOTKEY:
-                hotkeys.put("improve")
+            if msg.message == WM_HOTKEY and msg.wParam in actions:
+                hotkeys.put(actions[msg.wParam])
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -718,8 +734,9 @@ class Updater:
             z.extractall(work / "unpacked")
         tops = [d for d in (work / "unpacked").iterdir() if d.is_dir()]
         top = tops[0] if len(tops) == 1 else work / "unpacked"
-        source = (top / "blip.pyw").read_text(encoding="utf-8")
-        compile(source, "blip.pyw", "exec")  # a broken download never gets installed
+        for path in [top / "blip.pyw", *top.glob("*.py"), *top.glob("*.pyw")]:
+            # a broken download never gets installed
+            compile(path.read_text(encoding="utf-8"), path.name, "exec")
         self.events.put(("progress", 1.0))
         return top
 
@@ -1113,6 +1130,8 @@ class Blip:
         self.chute, self.chute_at = None, 0.0  # "parachute" / "glider" and when it opened
         self.door = None        # arriving or leaving through a door at a screen edge
         self.lean = None        # a break sitting against a screen's edge
+        self.skill = None       # the skill being performed
+        self.pose = {}          # where the current move puts Blip's body
         self.door_win = None
         self.pivot = (self.w / 2, self.h / 2)  # grip point on the canvas
         self.swing = 0.0                        # hanging angle, radians
@@ -1186,6 +1205,17 @@ class Blip:
             self.lines.humour = humour if humour in {k for k, _, _ in HUMOURS} else DEFAULT_HUMOUR
             self.humour_var = tk.StringVar(value=self.lines.humour)
             self.humour_var.trace_add("write", lambda *_: self.set_humour())
+            self.library = blip_skills.Library([SKILLS_DIR, MY_SKILLS_DIR])
+            self.library.refresh()
+            self.log_skill_problems()
+            off = settings.get("skills_off", [])
+            self.skills_off = {n for n in off if isinstance(n, str)} \
+                if isinstance(off, list) else set()
+            self.skill_vars = {}
+            self.skill_queue = {}   # name -> when a trigger asked for it
+            self.skill_timers = {}  # name -> (interval, next run)
+            self.skill_days = {}    # name -> the day its "at" time last came
+            self.next_skill_scan = now + SKILL_SCAN
             self.updater = Updater()
             self.auto_update = tk.BooleanVar(value=bool(settings.get("auto_update", True)))
             self.auto_update.trace_add("write", lambda *_: self.save())
@@ -1232,6 +1262,7 @@ class Blip:
         self.fill_menu(self.menu, root)
         self.tray_menu = tk.Menu(root, tearoff=0, font=self.menu_font)
         self.tray_menu.add_command(label="Hide Blip", command=self.toggle_hidden,
+                                   accelerator=HIDE_HOTKEY_LABEL,
                                    font=self.menu_heading)
         self.tray_menu.add_command(label="Find Blip", command=self.find_me)
         self.tray_menu.add_separator()
@@ -1266,6 +1297,10 @@ class Blip:
         talk.add_command(label="Moonwalk for me", command=lambda: self.start_act("moonwalk"))
         talk.add_command(label="Take a corner break", command=lambda: self.start_act("lean"))
         menu.add_cascade(label="Talk to me", menu=talk)
+        skills = submenu()
+        skills.configure(postcommand=lambda m=skills: self.fill_skills(m))
+        self.fill_skills(skills)
+        menu.add_cascade(label="Skills", menu=skills)
         menu.add_separator()
         # 2. Claude Code
         claude = submenu()
@@ -1458,7 +1493,8 @@ class Blip:
                        "claude_alerts": self.claude_alerts.get(), "size": self.size,
                        "session_clones": self.clones_on.get(),
                        "auto_update": self.auto_update.get(),
-                       "humour": self.lines.humour})
+                       "humour": self.lines.humour,
+                       "skills_off": sorted(self.skills_off)})
 
     def put_on(self, accessory):
         self.accessory = accessory
@@ -2234,6 +2270,23 @@ class Blip:
             elif event == "right":
                 self.root.after(0, self.tray_popup)
 
+    def take_hotkeys(self):
+        """The global hotkeys. Read even while Blip is hidden."""
+        later = []
+        while True:
+            try:
+                action = self.hotkeys.get_nowait()
+            except queue.Empty:
+                break
+            if action == "toggle":
+                self.toggle_hidden()
+            elif self.hidden:
+                later.append(action)  # rewriting waits until Blip is back
+            else:
+                self.start_draft(action)
+        for action in later:
+            self.hotkeys.put(action)
+
     def tray_popup(self):
         self.tray_menu.entryconfigure(0, label="Show Blip" if self.hidden else "Hide Blip")
         user32.SetForegroundWindow(hwnd_of(self.root))  # so an outside click closes it
@@ -2280,12 +2333,219 @@ class Blip:
 
     # -- antics
 
+    # -- skills: new moves and routines from the skills folders
+
+    def fill_skills(self, menu):
+        """Rebuilt each time it opens, so it always matches the files."""
+        for child in menu.winfo_children():
+            child.destroy()
+        menu.delete(0, "end")
+        if self.parent:
+            return
+        names = sorted(self.library.skills, key=str.lower)
+        for name in names:
+            if name not in self.skills_off:
+                menu.add_command(label=name, command=lambda n=name: self.run_skill(n))
+        if not names:
+            menu.add_command(label="No skills yet", state="disabled")
+        menu.add_separator()
+        if names:
+            switches = tk.Menu(menu, tearoff=0, font=self.menu_font)
+            self.skill_vars = {}
+            for name in names:
+                var = self.skill_vars[name] = tk.BooleanVar(
+                    value=name not in self.skills_off)
+                switches.add_checkbutton(label=name, variable=var,
+                                         command=lambda n=name: self.switch_skill(n))
+            menu.add_cascade(label="Turn skills on or off", menu=switches)
+        broken = len(self.library.problems)
+        if broken:
+            menu.add_command(label=f"{broken} skill file{'s' * (broken > 1)} with a problem",
+                             command=self.show_skill_problems)
+        menu.add_command(label="Open my skills folder", command=self.open_skills)
+
+    def switch_skill(self, name):
+        if self.skill_vars[name].get():
+            self.skills_off.discard(name)
+        else:
+            self.skills_off.add(name)
+            self.skill_queue.pop(name, None)
+        self.save()
+
+    def open_skills(self):
+        try:
+            MY_SKILLS_DIR.mkdir(exist_ok=True)
+            os.startfile(MY_SKILLS_DIR)
+        except OSError:
+            log.exception("could not open the skills folder")
+
+    def log_skill_problems(self):
+        for name, why in self.library.problems.items():
+            log.warning("skill %s: %s", name, why)
+
+    def show_skill_problems(self, name=None):
+        if not self.library.problems:
+            return
+        name = name or next(iter(self.library.problems))
+        self.mood("worried", 3)
+        self.say(f"I couldn't read {name}.", seconds=12, tag="Skills",
+                 detail=self.library.problems[name][:160], accent=ACCENT)
+
+    def scan_skills(self, now):
+        """Pick up new, edited and removed skill files while running."""
+        self.next_skill_scan = now + SKILL_SCAN
+        before, broken = set(self.library.skills), dict(self.library.problems)
+        if not self.library.refresh():
+            return
+        fresh = [n for n in self.library.skills if n not in before]
+        wrong = [n for n, why in self.library.problems.items() if why != broken.get(n)]
+        if wrong:
+            self.log_skill_problems()
+        if self.bubble_until or self.hidden:
+            return
+        if wrong:
+            self.show_skill_problems(wrong[0])
+        elif fresh:
+            self.jump()
+            self.mood("excited", 2.5)
+            more = f" and {len(fresh) - 1} more" if len(fresh) > 1 else ""
+            self.say(f"I learned a new skill: {fresh[0]}{more}!", seconds=9, tag="Skills",
+                     accent=ACCENT,
+                     buttons=[("Show me", lambda n=fresh[0]: self.run_skill(n))])
+
+    def skill_triggers(self, event=None):
+        """Queue the skills whose time has come, or that wait for a Claude Code event."""
+        now = time.time()
+        clock, day = time.strftime("%H:%M"), time.strftime("%Y-%m-%d")
+        for name, skill in self.library.skills.items():
+            if name in self.skills_off:
+                self.skill_timers.pop(name, None)
+                continue
+            due = bool(event) and skill.claude == event
+            if event is None and skill.every:
+                interval, at = self.skill_timers.get(name, (None, 0))
+                if interval != skill.every:
+                    self.skill_timers[name] = (skill.every, now + skill.every)
+                elif now >= at:
+                    self.skill_timers[name] = (skill.every, now + skill.every)
+                    due = True
+            if event is None and skill.at == clock and self.skill_days.get(name) != day:
+                self.skill_days[name] = day
+                due = True
+            if due:
+                self.skill_queue[name] = now
+
+    def free_for_skill(self):
+        return (self.act is None and not self.skill and not self.bubble_until
+                and not self.menu_open and not self.dragging and self.air == 0
+                and not self.vx and not self.leap and not self.door and not self.drafting)
+
+    def run_skill(self, name):
+        """Perform a skill now."""
+        skill = self.library.skills.get(name)
+        if (not skill or self.dragging or self.air > 0 or self.leap or self.door
+                or self.act == "wait"):
+            return
+        self.stop_skill()
+        self.hush()
+        self.act, self.lean = None, None
+        self.last_antic = f"skill:{name}"
+        self.skill = {"skill": skill, "next": 0, "kind": None, "value": None,
+                      "until": 0.0, "x": 0.0}
+
+    def stop_skill(self):
+        if self.skill and self.act == "skill":
+            self.act = None
+        self.skill, self.pose = None, {}
+
+    def skill_step(self, now):
+        """Carry the running skill on: pose its move, or go to the next step."""
+        if now >= self.next_skill_scan:
+            self.scan_skills(now)
+            self.skill_triggers()
+        for name, asked in list(self.skill_queue.items()):
+            if now - asked > SKILL_WAIT:
+                del self.skill_queue[name]
+            elif self.free_for_skill():
+                del self.skill_queue[name]
+                self.run_skill(name)
+        run = self.skill
+        if not run:
+            return
+        kind = run["kind"]
+        # Picked up, thrown, sent away or busy with something else: the skill stops.
+        if kind == "act":
+            ours = self.act in (None, run["value"])
+        else:
+            ours = kind is None or self.act == "skill"
+        if self.dragging or self.air > 0 or self.leap or self.door or not ours:
+            self.stop_skill()
+            return
+        if kind == "act":
+            if self.act is not None:
+                return  # one of Blip's own antics, still going
+        elif kind and now < run["until"]:
+            if kind == "move":
+                self.pose = run["value"].pose(now - self.act_start)
+                self.pose["effect"] = run["value"].effect
+            return
+        if run["next"] >= len(run["skill"].steps):
+            self.stop_skill()
+            self.next_antic = now + random.uniform(*ANTIC_GAP)
+            self.mode, self.mode_until = "rest", now + 1.5
+            return
+        kind, value, options = run["skill"].steps[run["next"]]
+        run.update(next=run["next"] + 1, kind=kind, value=value, x=0.0)
+        self.pose = {}
+        if kind == "act":
+            self.act = None
+            self.start_act(value)
+            if self.act != value:
+                self.stop_skill()
+            return
+        self.act, self.act_start, self.act_end = "skill", now, float("inf")
+        seconds = options.get("seconds")
+        if kind == "move":
+            seconds = value.seconds
+            self.hush()
+            self.pose = value.pose(0.0)
+            self.pose["effect"] = value.effect
+        elif kind == "say":
+            line = random.choice(value)
+            seconds = seconds or max(3.5, 2.0 + len(line) * 0.06)
+            link = options.get("link")
+            buttons = [(link[0], lambda u=link[1]: webbrowser.open(u))] if link else ()
+            self.say(line, seconds=max(seconds, 12) if link else seconds,
+                     buttons=buttons, tag=run["skill"].name)
+        elif kind == "mood":
+            seconds = seconds or 2.0
+            self.mood(value, seconds)
+        elif kind == "jump":
+            self.jump()
+            seconds = 0.7
+        elif kind == "turn_around":
+            self.direction *= -1
+            seconds = 0.4
+        else:
+            seconds = value  # wait
+        run["until"] = now + seconds
+
     def start_antic(self):
         self.hush()
+        self.stop_skill()
         choices = [a for a in ANTICS if a[0] != self.last_antic]
+        if not self.parent:
+            choices += [(f"skill:{n}", k.random, 0.0) for n, k in self.library.skills.items()
+                        if k.random and n not in self.skills_off
+                        and f"skill:{n}" != self.last_antic]
         name, _, seconds = random.choices(choices, [a[1] for a in choices])[0]
         self.last_antic = name
         now = time.time()
+        if name.startswith("skill:"):
+            self.act = None
+            self.next_antic = now + random.uniform(*ANTIC_GAP)
+            self.run_skill(name[len("skill:"):])
+            return
         if name == "suggest":
             self.act = None
             self.next_antic = now + random.uniform(*ANTIC_GAP)
@@ -2415,7 +2675,8 @@ class Blip:
                 self.react("moonwalk_done")
 
     def antic_due(self, now):
-        return (not self.quiet.get() and self.act is None and not self.bubble_until
+        return (not self.quiet.get() and self.act is None and not self.skill
+                and not self.bubble_until
                 and not self.menu_open and self.jump_started is None
                 and not self.dragging and self.air == 0 and not self.vx and not self.leap
                 and not self.door
@@ -2435,7 +2696,8 @@ class Blip:
     def window_y(self):
         if self.leap:
             return int(self.leap_floor) - self.h
-        return self.area()[3] - self.h - int(self.jump_height(time.time()) + self.air)
+        hop = self.px(self.pose.get("lift", 0)) if self.act == "skill" else 0
+        return self.area()[3] - self.h - int(self.jump_height(time.time()) + self.air + hop)
 
     def watch_mouse(self):
         """Look at the mouse when it is near; return True while it is near."""
@@ -2479,6 +2741,14 @@ class Blip:
         if self.act == "lean" and self.lean and not self.dragging and self.air == 0:
             return self.lean_step(now)
         grounded = not self.dragging and self.air == 0
+        if self.act == "skill":  # a move may travel; it stops at the screen's edges
+            if grounded and "x" in self.pose and self.skill:
+                step = self.pose["x"] - self.skill["x"]
+                self.skill["x"] = self.pose["x"]
+                left, _, right, _ = self.area()
+                self.x = float(min(max(self.x + step * self.s * self.direction, left),
+                                   right - self.w))
+            return False
         walking = (self.mode == "walk" and self.act is None and not self.watching
                    and not self.bubble_until and not self.menu_open
                    and self.jump_started is None and grounded and not self.vx)
@@ -2526,6 +2796,8 @@ class Blip:
             return "excited"
         if self.chute:
             return "surprised" if now - self.chute_at < 0.5 else "happy"
+        if act == "skill" and self.pose.get("face"):
+            return self.pose["face"]
         if self.jump_started is not None or self.air > 0:
             return "surprised"
         if act in ("nap", "glitch", "spin"):
@@ -2556,6 +2828,8 @@ class Blip:
         act = self.act
         if self.dragging or self.air > 0:  # swinging as it is carried
             return math.sin(now * 2.5) * 5  # looking around while it hangs
+        if act == "skill" and "tilt" in self.pose:
+            return self.pose["tilt"]
         if act == "skate":
             return 7 * self.direction + math.sin(now * 6) * 3
         if self.current_prop(now) == "laptop":
@@ -2594,7 +2868,8 @@ class Blip:
         lw = max(2, self.px(2))
         airborne = self.dragging or self.air > 0 or bool(self.leap)
 
-        sway = math.sin(t * 7) * 6 * s if act == "dance" else 0.0
+        pose = self.pose if act == "skill" else {}
+        sway = math.sin(t * 7) * 6 * s if act == "dance" else pose.get("sway", 0.0) * s
         if walking:
             bob = abs(math.sin(self.step))
         elif act == "dance":
@@ -2611,13 +2886,17 @@ class Blip:
         stretch = 0.0
         if self.jump_started is not None:
             stretch = 0.18 * abs(1 - 2 * min(1.0, (now - self.jump_started) / 0.6))
-        self.tilt += (self.target_tilt(now, t, walking) - self.tilt) * 0.25
+        quick = 0.7 if "tilt" in pose else 0.25  # keyframes are smooth already
+        self.tilt += (self.target_tilt(now, t, walking) - self.tilt) * quick
         # While it travels, Blip turns three-quarters toward where it's going, and
         # turns back to face you when it stops. Everything below is drawn as if
         # rotated about the vertical axis by `yaw`.
         sit = self.sit_amount(now)
         side_on = (walking or act in ("moonwalk", "skate", "lean")) and not airborne
-        self.turn += ((1.0 if side_on else 0.0) - self.turn) * 0.14
+        if "turn" in pose:
+            self.turn += (pose["turn"] - self.turn) * 0.6
+        else:
+            self.turn += ((1.0 if side_on else 0.0) - self.turn) * 0.14
         yaw = math.radians(50) * self.turn * self.direction
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         turned = abs(sin_y) > 0.05
@@ -2650,7 +2929,8 @@ class Blip:
             ground -= 10 * s
 
         # legs and chunky feet
-        body_bottom = ground - 17 * s - bob * 2 * s - stretch * 10 * s + 11 * s * sit
+        body_bottom = (ground - 17 * s - bob * 2 * s - stretch * 10 * s
+                       + 11 * s * max(sit, pose.get("squat", 0.0)))
         body_top = body_bottom - 19 * s + breathe * 0.6 * s
         body_half = 20 * s * cos_y + 13 * s * abs(sin_y)  # a box 40 wide, 26 deep
         bx1, bx2 = cx - body_half, cx + body_half
@@ -2692,6 +2972,9 @@ class Blip:
                     lift = max(0.0, math.sin(t * 7) * side) * 6 * s
                 elif airborne:  # little legs dangling and kicking
                     lift = (math.sin(now * 7 + side * 1.6) + 1) * 2 * s
+            foot = pose.get("foot_left" if side < 0 else "foot_right")
+            if foot:
+                self.foot_off[i], lift = foot[0] * s, foot[1] * s
             hip_x = cx + side * 12 * s * cos_y
             fx = cx + side * 14 * s * cos_y + self.foot_off[i]
             knee_y = ground - 9 * s - lift - (5 * s if tiptoe else 0)
@@ -2870,6 +3153,15 @@ class Blip:
         self.draw_prop(c, now, cx, bx1, bx2, body_top, cup, ground, walking)
         if self.chute:
             self.draw_chute(c, now, cx, body_top, front=True)
+        if "hand_left" in pose or "hand_right" in pose:
+            for side, key, shoulder in ((-1, "hand_left", bx1 + 1 * s),
+                                        (1, "hand_right", bx2 - 1 * s)):
+                out, up = pose.get(key, blip_skills.HAND_REST)
+                high = body_top + 7 * s
+                self.draw_limb(c, side, shoulder, high, shoulder + side * out * s,
+                               high - up * s)
+        if pose.get("roll"):  # the whole body leans from its feet
+            self.rotate_all(cx, ground, math.radians(pose["roll"]))
 
         self.draw_effects(c, now, t, cx, self.head_y)
         self.draw_mood_effects(c, now, cx, self.head_y, self.face_now)
@@ -2978,6 +3270,10 @@ class Blip:
         act = self.act
         if act == "lean" and self.lean and self.lean["phase"] != "walk":
             return None  # hands free for a proper rest
+        if act == "skill" and self.skill and self.skill["kind"] == "move":
+            if (not self.skill["value"].prop
+                    or any(k.startswith("hand") for k in self.pose)):
+                return None  # the move needs both hands
         if (self.dragging or self.air > 0 or self.leap
                 or act in ("nap", "skate", "glitch", "spin")):
             return None
@@ -3009,6 +3305,20 @@ class Blip:
         c.create_line(x0, y0, x1, y1, fill=LEG, width=max(3, px(3.5)), capstyle="round")
         c.create_oval(x1 - 3.8 * s, y1 - 3.8 * s, x1 + 3.8 * s, y1 + 3.8 * s,
                       fill=LEG_LIGHT, outline=OUTLINE)
+
+    def draw_limb(self, c, side, x0, y0, x1, y1):
+        """A move's arm: bent at the elbow, with a bigger, brighter mitt so the pose
+        reads even in front of the headphones."""
+        s, px = self.s, self.px
+        reach = min(1.0, math.hypot(x1 - x0, y1 - y0) / (30 * s))
+        ex = (x0 + x1) / 2 + side * 6 * s * reach
+        ey = (y0 + y1) / 2 + 7 * s * reach  # the elbow hangs a little low
+        for color, wide in ((OUTLINE, max(5, px(7))), (LEG_LIGHT, max(3, px(4.2)))):
+            c.create_line(x0, y0, ex, ey, x1, y1, fill=color, width=wide, smooth=True,
+                          capstyle="round")
+        c.create_oval(x1 - 5.5 * s, y1 - 5.5 * s, x1 + 5.5 * s, y1 + 5.5 * s,
+                      fill=mix(LEG_LIGHT, "#ffffff", 0.35), outline=OUTLINE,
+                      width=max(1, px(1.5)))
 
     def draw_carry(self, c, now, prop, cx, bx1, bx2, top, cup):
         """Walking with something: it's held in the leading hand, bobbing a little
@@ -3478,6 +3788,12 @@ class Blip:
         s, act = self.s, self.act
         if act == "lean":
             act = {"think": "think", "doze": "nap"}.get(self.lean_resting())
+        if act == "skill":
+            effect = self.pose.get("effect")
+            if effect in ("sparkles", "hearts"):
+                self.draw_mood_effects(c, now, cx, head_y,
+                                       "excited" if effect == "sparkles" else "love")
+            act = {"music": "dance", "zzz": "nap"}.get(effect)
         if act in ("think", "wait"):
             lit = int(now * 3) % 4
             for i in range(3):
@@ -3593,6 +3909,9 @@ class Blip:
                 self.start_work(sid, event)
             elif kind in ("Stop", "SessionEnd", "SessionStart"):
                 self.claude_working.pop(sid, None)
+            if (kind in ("Stop", "UserPromptSubmit") and self.claude_alerts.get()
+                    and event.get("source") != "test"):
+                self.skill_triggers("done" if kind == "Stop" else "prompt")
             if kind in ("Stop", "Notification", "Say"):
                 self.pending_alerts.append(event)
         if not self.claude_alerts.get():
@@ -3648,12 +3967,6 @@ class Blip:
         self.take_alerts()
         self.take_updates(now)
         self.take_draft_result()
-        while True:
-            try:
-                style = self.hotkeys.get_nowait()
-            except queue.Empty:
-                break
-            self.start_draft(style)
         if any(c.task["state"] == "merging" for c in self.clones.values()):
             self.mode, self.mode_until = "rest", now + 1  # wait for it
 
@@ -3773,6 +4086,7 @@ class Blip:
         now = time.time()
         if self.parent is None:
             self.take_tray()
+            self.take_hotkeys()
             if self.hidden or not self.alive:
                 return  # out through the door; the tray icon brings Blip back
         if self.parent:
@@ -3814,6 +4128,8 @@ class Blip:
         self.fall()
         self.swing_step()
         self.update_act(now)
+        if self.parent is None:
+            self.skill_step(now)
         if self.antic_due(now):
             self.start_antic()
 

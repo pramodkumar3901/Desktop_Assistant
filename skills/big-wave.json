@@ -1,0 +1,16 @@
+{
+  "name": "Big wave",
+  "moves": {
+    "wave": {
+      "length": 0.6, "repeat": 6, "face": "happy",
+      "keys": [
+        { "t": 0.0, "hand_right": [38, 40], "tilt": 7,  "roll": 3 },
+        { "t": 0.3, "hand_right": [52, 26], "tilt": 11, "roll": 6 }
+      ]
+    }
+  },
+  "do": [
+    { "move": "wave" },
+    { "say": ["Hi! Yes, you!", "Hello from down here!"] }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "Stretch break",
+  "moves": {
+    "reach": {
+      "length": 4.0, "repeat": 2, "face": "happy",
+      "keys": [
+        { "t": 0.0, "hand_left": [6, -11], "hand_right": [6, -11], "squat": 0.0, "roll": 0 },
+        { "t": 1.0, "hand_left": [40, 46], "hand_right": [40, 46], "squat": 0.0, "roll": 0 },
+        { "t": 2.0, "hand_left": [14, 48], "hand_right": [52, 24], "squat": 0.0, "roll": 10 },
+        { "t": 3.0, "hand_left": [52, 24], "hand_right": [14, 48], "squat": 0.0, "roll": -10 },
+        { "t": 3.7, "hand_left": [40, 0],  "hand_right": [40, 0],  "squat": 0.8, "roll": 0 }
+      ]
+    }
+  },
+  "do": [
+    { "say": ["Stretch with me! Arms up.", "Time to un-fold ourselves."], "seconds": 3.5 },
+    { "move": "reach" },
+    { "say": ["Better! Now blink a few times too.", "Your spine says thanks."] }
+  ]
+}

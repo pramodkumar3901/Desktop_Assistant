@@ -23,6 +23,9 @@ door that opens in a bottom corner of the screen. Right-click Blip and choose **
 For one-click shortcuts, make a Windows shortcut to each command (right-click in the
 folder → New → Shortcut, and paste the command with the full path to `blip_control.pyw`).
 
+**Hide or show:** press **Ctrl+Alt+Q** anywhere. Blip walks out through its door, and
+the same keys bring it back.
+
 **Tray icon:** Blip puts its robot face in the notification area (the icons by the clock;
 it may be in the overflow arrow, and you can drag it out). Left-click it to find Blip (or bring
 it back). Right-click it for **Hide Blip / Show Blip** (it leaves or returns through a door),
@@ -101,6 +104,15 @@ Every 25–70 seconds it does something on its own:
   **Yes please!** and **No thanks** buttons
 
 Tick **Quiet mode** in the right-click menu to stop the random antics.
+
+## Skills: add your own moves
+
+Blip can learn new dances, moves and routines without an update. Each one is a small JSON
+file: drop it in `my_skills` (right-click Blip, **Skills**, **Open my skills folder**) and
+Blip picks it up while running. It comes with **The Robot**, **Disco**, **Floss**,
+**Big wave** and **Stretch break**. A skill can run from the menu, at random, on a timer, at
+a time of day or when Claude Code finishes. Skills are data, never code.
+See [docs/skills.md](docs/skills.md) to write one, or ask Claude to write it for you.
 
 ## Updates
 

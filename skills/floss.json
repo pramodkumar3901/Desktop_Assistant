@@ -1,0 +1,19 @@
+{
+  "name": "Floss",
+  "when": { "random": 0.5 },
+  "moves": {
+    "floss": {
+      "length": 1.2, "repeat": 6, "face": "excited", "effect": "music",
+      "keys": [
+        { "t": 0.0, "sway": -9, "tilt": 6,  "hand_left": [-12, -8], "hand_right": [38, -2] },
+        { "t": 0.3, "sway": 9,  "tilt": -6, "hand_left": [38, -2],  "hand_right": [-12, -8] },
+        { "t": 0.6, "sway": -9, "tilt": 6,  "hand_left": [-12, -8], "hand_right": [38, -2] },
+        { "t": 0.9, "sway": 9,  "tilt": -6, "hand_left": [38, 12],   "hand_right": [-14, 2] }
+      ]
+    }
+  },
+  "do": [
+    { "move": "floss" },
+    { "say": ["My servos are warm now.", "I practise this while you're in meetings."] }
+  ]
+}
