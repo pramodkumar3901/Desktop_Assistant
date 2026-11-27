@@ -2,7 +2,8 @@
 
 A tiny, over-eager AI robot that walks along the bottom of your screen: a 3D
 screen-faced robot with glowing eyes, in the spirit of the animated office
-assistants of the 90s. It wants very badly to help and almost never does.
+assistants of the 90s. It wants very badly to help and almost never does. Click it, though, and you can ask Claude
+anything or hand it a task.
 
 ![Blip walking in through a door, strolling side-on, moonwalking, gliding and
 parachuting down after being thrown, a mini Blip walking in for a second Claude Code
@@ -35,7 +36,7 @@ it back). Right-click it for **Hide Blip / Show Blip** (it leaves or returns thr
 | You do | Blip does |
 | --- | --- |
 | Move the mouse close | Stops, turns its eyes and head toward it (and wakes up if napping). Stay a while and it gets heart eyes |
-| Click Blip | Jumps and encourages you |
+| Click Blip | Jumps and opens a box above it to [ask Claude](#chat-with-claude). Click again to close it |
 | Drag Blip | Hangs from where you grabbed it and swings as you move it, legs dangling; let go and it falls, lands and is dizzy |
 | Throw Blip | Flick it as you let go and it flies, bouncing off the screen edges. If the fall gets dangerous it opens a **parachute**, or a **hang-glider** when it's flying sideways fast, and lands safely; a low throw makes it skid |
 | Right-click Blip | The menu below |
@@ -45,6 +46,8 @@ The right-click menu, in three groups:
 
 | Menu | Holds |
 | --- | --- |
+| **Ask Claude…** | The same box as clicking Blip |
+| **Claude chat** | Show the last reply, Open in the Claude app, New chat, Choose the folder for tasks |
 | **Rewrite copied text** | Improve it, Make it shorter, More professional, Friendlier, Fix grammar only, Undo last rewrite |
 | **Talk to me** | Encourage me, Say something funny, Check in on me, Humour, Do something random, Moonwalk for me, Take a corner break |
 | **Claude Code** | Connected to Claude Code, Show alerts, A mini Blip for each extra session, What can you do?, Send a test alert |
@@ -52,6 +55,38 @@ The right-click menu, in three groups:
 | **Updates** | The version, Update automatically, Check for updates now |
 | **Quiet mode** | No random antics |
 | **Bye, Blip (quit)** | Walks out through a door and closes Blip |
+
+## Chat with Claude
+
+Click Blip, type a question or a task and press **Enter** (Shift+Enter adds a line, Esc
+closes the box and keeps what you typed). Blip types on its laptop while Claude works, says
+what it's doing, and then shows **only Claude's latest reply** on its card, with:
+
+- **Reply:** opens the box again to carry on
+- **Open in Claude:** opens the whole conversation in the Claude desktop app
+- **Copy:** copies the full reply, including anything the card cut short
+
+**Stop** on the working card ends the current message. Click Blip while it's working to bring
+that card back.
+
+**One conversation.** It's a normal Claude Code session named **Blip**. Blip keeps using it,
+even after a restart, until you choose **New chat**. You can carry on in the Claude app, and
+Blip's next message follows on from there. Use one at a time: don't send from both while
+either is still answering. A reply to something you type in Blip may not appear in an
+already open app window straight away.
+
+**Tasks need your OK.** When Claude wants to do something that needs permission, such as
+changing a file or running a command, Blip's card says **Claude needs your OK** with
+**Allow** and **Deny**. Each Allow covers that one request. If the request is too long for
+the card, there's no Allow until you've opened it with **See all**. Reading files in the task
+folder and anything your Claude Code settings already allow run without asking.
+
+**The task folder** is the folder that holds Blip's own folder, until you pick another with
+**Claude chat → Choose the folder for tasks**. Changing it starts a new chat. Claude Code
+uses that folder's own settings, hooks and `CLAUDE.md` without showing its usual "do you
+trust this folder?" question, so only choose folders you trust.
+
+The chat uses your usual Claude Code model and setup, and counts against your Claude usage.
 
 ## Draft helper
 
@@ -132,7 +167,7 @@ after it starts, and every 6 hours after that, it checks for a newer release:
 
 1. It says the new version is out and downloads it, with a progress bar over its laptop
    (click Blip to see how far it's got).
-2. It waits until you're not busy: no draft, Claude session, mini Blips or open menu.
+2. It waits until you're not busy: no draft, chat, Claude session, mini Blips or open menu.
 3. It says it's installing, walks out through a door, swaps in the new files and
    restarts.
 4. It walks back in through a door saying which version it is now, with the release's
@@ -174,7 +209,9 @@ gh release create v1.1.0 --title "Blip 1.1.0" --notes "- What changed, first lin
   fall back to built-in lines. These calls count against your Claude usage.
 - For these lines, the only things sent are the day and time, the humour style and Blip's own recent lines. Blip does not
   read your screen or keyboard; it reads the clipboard only when you ask for a rewrite.
-- The model is `claude-opus-5-5`. Set the `BLIP_MODEL` environment variable to
+  [Chat](#chat-with-claude) is different: it's a full Claude Code session, so it sends what
+  you type, and Claude can read files in the task folder.
+- The model for lines and rewrites is `claude-opus-5-5`. Set the `BLIP_MODEL` environment variable to
   use another one.
 - If a call fails, Blip says so and writes the reason to `blip.log`.
 

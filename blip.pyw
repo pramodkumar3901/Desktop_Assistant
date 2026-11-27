@@ -26,14 +26,17 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+import uuid
 import webbrowser
 import zipfile
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tkinter import filedialog
 from tkinter import font as tkfont
 
 import blip_chat
+import blip_session
 import blip_skills
 
 MODEL = os.environ.get("BLIP_MODEL", "claude-opus-5-5")
@@ -54,7 +57,7 @@ SKILL_WAIT = 10 * 60     # a triggered skill that can't run for this long is dro
 
 # Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
 # v<VERSION>; every Blip finds it, downloads it and installs it.
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 UPDATE_REPO = "pramodkumar3901/Desktop_Assistant"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_FIRST_CHECK = 45        # seconds after starting
@@ -237,6 +240,14 @@ DRAFT_STYLES = {
                                     "nothing else."),
 }
 DRAFT_MAX_CHARS = 12000
+
+# Chatting with Claude from Blip.
+CHAT_FOLDER = Path(__file__).resolve().parent.parent  # where tasks run unless you choose
+CHAT_CARD_CHARS = 420    # a longer reply is cut short on the card
+CHAT_CARD_LINES = 10
+ASK_CARD_CHARS = 280     # a longer request must be read in full before Allow appears
+ASK_CARD_LINES = 7
+CHAT_GUARD = 0.7         # seconds before Allow counts, so a stray click can't approve
 DRAFT_HOTKEY_LABEL = "Ctrl+Alt+I"
 HIDE_HOTKEY_LABEL = "Ctrl+Alt+Q"
 # Global hotkeys, all Ctrl+Alt plus a letter: (letter, what is queued, label)
@@ -1082,7 +1093,8 @@ CLAUDE_HELP = (
     "• Wave my phone when Claude needs your OK or an answer\n"
     "• Pass on Claude's messages: ask it to \"ping me through Blip when the tests "
     "pass\"\n"
-    "• Rewrite drafts: copy text, then press " + DRAFT_HOTKEY_LABEL)
+    "• Rewrite drafts: copy text, then press " + DRAFT_HOTKEY_LABEL + "\n"
+    "• Chat and run tasks: click me and type")
 
 
 # --- The pet -----------------------------------------------------------------
@@ -1105,6 +1117,19 @@ class Blip:
         self.draft_style = self.draft_kept_style = "improve"  # asked for / in the chat
         self.draft_items = []    # the draft chat: (who, text)
         self.draft_chat = None   # its window, while open
+        self.ask_box = None      # the box you ask Claude in, while open
+        self.ask_draft = ""      # what you typed there but haven't sent
+        self.ask_at = None       # where the box was last put
+        self.details_box = None  # a permission request shown in full
+        self.chat_events = queue.Queue()
+        self.chat_turn = None    # the message Claude is working on
+        self.chat_message = ""
+        self.chat_progress = ""
+        self.chat_asks = []      # Claude's requests waiting for Allow or Deny
+        self.chat_reply = ""     # Claude's last answer
+        self.chat_ids = set()    # this chat's session ids, to skip their own alerts
+        self.card_owner = None   # which part of Blip the card on show belongs to
+        self.bubble_shown_at_click = 0.0
         self.phone_until = 0.0
         self.pending_alerts = []
         self.claude_working = {}  # session id -> when Claude started on a prompt
@@ -1189,6 +1214,7 @@ class Blip:
         self.button_font = tkfont.Font(family=family, size=9, weight="bold")
         self.tag_font = tkfont.Font(family=family, size=8, weight="bold")
         self.detail_font = tkfont.Font(family=family, size=10, slant="italic")
+        self.chat_font = tkfont.Font(family=family, size=10)
         self.menu_font = tkfont.Font(family="Segoe UI", size=10)
         self.menu_heading = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.card_size = (0, 0)
@@ -1242,6 +1268,13 @@ class Blip:
             self.skill_timers = {}  # name -> (interval, next run)
             self.skill_days = {}    # name -> the day its "at" time last came
             self.next_skill_scan = now + SKILL_SCAN
+            session = settings.get("chat_session")
+            self.chat_session = session if isinstance(session, str) else ""
+            self.chat_started = bool(settings.get("chat_started")) and bool(self.chat_session)
+            folder = settings.get("chat_folder")
+            self.chat_dir = folder if isinstance(folder, str) else ""
+            if self.chat_session:
+                self.chat_ids.add(self.chat_session)
             self.updater = Updater()
             self.auto_update = tk.BooleanVar(value=bool(settings.get("auto_update", True)))
             self.auto_update.trace_add("write", lambda *_: self.save())
@@ -1302,6 +1335,13 @@ class Blip:
             return tk.Menu(menu, tearoff=0, font=font)
 
         # 1. Things Blip does for you
+        menu.add_command(label="Ask Claude…", command=self.open_ask)
+        chat = submenu()
+        chat.add_command(label="Show the last reply", command=self.show_reply)
+        chat.add_command(label="Open in the Claude app", command=self.open_chat_in_claude)
+        chat.add_command(label="New chat", command=self.new_chat)
+        chat.add_command(label="Choose the folder for tasks…", command=self.choose_folder)
+        menu.add_cascade(label="Claude chat", menu=chat)
         drafts = submenu()
         for key, (label, _) in DRAFT_STYLES.items():
             drafts.add_command(label=label, command=lambda k=key: self.start_draft(k))
@@ -1392,6 +1432,7 @@ class Blip:
 
         for font, points in ((self.bubble_font, 8.5), (self.button_font, 7.5),
                              (self.tag_font, 6), (self.detail_font, 8),
+                             (self.chat_font, 8.5),
                              (self.menu_font, 10), (self.menu_heading, 9)):
             pixels(font, points, self.ui, 8)
         pixels(self.small_font, 7, self.s, 5)
@@ -1498,22 +1539,22 @@ class Blip:
     # -- input
 
     def on_click(self, _event):
-        self.jump()
         if self.parent:
+            self.jump()
             self.say(self.task_status(), seconds=6, tag=self.task_tag(), accent=ACCENT)
             return
-        if self.act == "wait":
+        if self.ask_box:
+            self.ask_box.close()
             return
-        if self.act == "nap":
-            self.act = None
-            self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
-            self.react("woken")
-            return
+        self.jump()
         if self.act == "download":
             self.say(f"Downloading version {self.update_version}: "
                      f"{int((self.update_progress or 0) * 100)}% so far.", tag="Update")
             return
-        self.speak("encourage")
+        if self.chat_turn:
+            self.show_chat_status()
+            return
+        self.open_ask()
 
     def save(self):
         save_settings({"accessory": self.accessory, "quiet": self.quiet.get(),
@@ -1521,6 +1562,9 @@ class Blip:
                        "session_clones": self.clones_on.get(),
                        "auto_update": self.auto_update.get(),
                        "humour": self.lines.humour,
+                       "chat_session": self.chat_session,
+                       "chat_started": self.chat_started,
+                       "chat_folder": self.chat_dir,
                        "skills_off": sorted(self.skills_off)})
 
     def put_on(self, accessory):
@@ -1707,6 +1751,7 @@ class Blip:
         tags = c.gettags(current[0]) if current else ()
         action = next((self.bubble_actions[t] for t in tags
                        if t in self.bubble_actions), None)
+        self.bubble_shown_at_click = self.bubble_shown_at
         self.hush()
         if action:
             action()
@@ -1761,13 +1806,15 @@ class Blip:
         self.mood("cry", 5)
         self.say_kind("declined")
 
-    def say(self, text, seconds=None, buttons=(), tag="Blip", detail=None, accent=None):
+    def say(self, text, seconds=None, buttons=(), tag="Blip", detail=None, accent=None,
+            width=190, owner=None):
         """Show a speech card: a small header, the line, an optional quote, buttons."""
         now = time.time()
         if seconds is None:
             seconds = max(4.0, 2.0 + len(text) * 0.08 + len(detail or "") * 0.03)
         c, px = self.bubble_canvas, self.upx
-        pad, gap, wrap = px(8), px(5), px(190)  # compact
+        pad, gap, wrap = px(8), px(5), px(width)  # compact
+        self.card_owner = owner
         accent = accent or EYE
         c.delete("all")
         self.bubble_actions = {}
@@ -1859,7 +1906,10 @@ class Blip:
         fade = min(1.0, (time.time() - self.bubble_shown_at) / 0.18)
         bx = min(max(center - width // 2, left), right - width)
         anchor = px(4) if self.chute else int(self.head_y)  # above the canopy or wing
-        by = max(self.window_y() + anchor - height + px(4), top)
+        by = self.window_y() + anchor - height + px(4)
+        if self.ask_box and self.ask_box.alive():
+            by = self.ask_box.top() - height  # stacked above the box you're typing in
+        by = max(by, top)
         by += int((1 - fade) * px(8))  # rises into place as it fades in
         self.bubble.geometry(f"{width}x{height}+{bx}+{by}")
         if fade < 1 or self.bubble_alpha < 1:
@@ -1886,9 +1936,322 @@ class Blip:
         c.tag_lower("shape")
 
     def hush(self):
+        self.card_owner = None
         self.bubble.withdraw()
         self.bubble_until = 0.0
         self.wave_until = 0.0
+
+    # -- chatting with Claude
+
+    def chat_style(self):
+        return ({"card": CARD, "raised": CARD_RAISED, "hover": CARD_HOVER,
+                 "border": CARD_BORDER_HI, "text": CARD_TEXT, "muted": CARD_MUTED,
+                 "accent": EYE},
+                {"body": self.chat_font, "small": self.menu_heading,
+                 "tag": self.tag_font, "button": self.button_font})
+
+    def chat_folder(self):
+        return self.chat_dir if os.path.isdir(self.chat_dir) else str(CHAT_FOLDER)
+
+    def open_ask(self):
+        """The box above Blip for a question or a task."""
+        if self.hidden or self.door:
+            return
+        if self.ask_box:
+            self.ask_box.focus()
+            return
+        if self.skill:
+            self.stop_skill()
+        if self.act not in (None, "wait", "download"):
+            self.act = None
+        self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
+        self.hush()
+        links = [("New chat", self.new_chat)]
+        if self.chat_started:
+            links.append(("Open in Claude", self.open_chat_in_claude))
+
+        def closed(left):
+            self.ask_draft, self.ask_box = left, None
+
+        colors, fonts = self.chat_style()
+        self.ask_box = blip_chat.AskBox(self.root, colors, fonts, self.upx(270),
+                                        self.ask_draft, self.ask, links, closed)
+        self.ask_at = None
+        self.place_ask()
+        self.ask_box.focus()
+
+    def place_ask(self):
+        """Keep the box just above Blip's head (not bobbing along with its jumps)."""
+        at = (int(self.x) + self.w // 2,
+              int(self.area()[3] - self.h - self.air + self.head_y), self.area())
+        if at != self.ask_at:
+            self.ask_at = at
+            self.ask_box.place(*at)
+
+    def ask(self, message):
+        """Send a message to Claude. True if it went."""
+        if self.chat_turn:
+            self.say("I'm still on your last one. Stop it, or wait a moment.", seconds=5,
+                     tag="Claude", buttons=[("Stop", self.stop_chat)])
+            return False
+        exe = find_claude()
+        if not exe:
+            self.say("I can't find the claude command. Install Claude Code and sign in.",
+                     seconds=9, tag="Claude")
+            return False
+        if not self.chat_session:
+            self.chat_session, self.chat_started = str(uuid.uuid4()), False
+            self.save()
+        self.chat_ids.add(self.chat_session)
+        self.chat_message = message
+        self.start_turn(exe)
+        return True
+
+    def start_turn(self, exe):
+        self.close_details()
+        self.chat_asks = []
+        self.chat_progress = "Thinking…"
+        self.chat_turn = blip_session.Turn(
+            exe, self.chat_message, self.chat_session, self.chat_started,
+            self.chat_folder(), self.chat_events, log)
+        if self.act is None:
+            self.act, self.act_start = "wait", time.time()
+        self.show_chat_status()
+
+    def show_chat_status(self):
+        """What Claude is doing now, or the request that's waiting for you."""
+        if self.chat_asks:
+            self.show_request()
+        elif self.chat_turn:
+            self.say(self.chat_progress, seconds=3600, tag="Claude · working",
+                     buttons=[("Stop", self.stop_chat)], owner="chat")
+
+    def show_request(self):
+        """Allow or Deny. Allow only appears once the whole request has been shown."""
+        request = self.chat_asks[0]
+        title, details = blip_session.describe_request(request, self.chat_folder())
+        lines = details.splitlines()
+        cut = len(details) > ASK_CARD_CHARS or len(lines) > ASK_CARD_LINES
+        if cut:
+            details = ("\n".join(lines[:ASK_CARD_LINES])[:ASK_CARD_CHARS].rstrip()
+                       + "\n… (cut off)")
+        deny = ("Deny", lambda: self.answer_request(request, False))
+        allow = ("Allow", lambda: self.answer_request(request, True))
+        see = ("See all", lambda: self.show_details(request))
+        if not cut:
+            buttons = [allow, deny]
+        elif request.get("seen"):
+            buttons = [allow, deny, see]
+        else:
+            buttons = [see, deny]
+        waiting = len(self.chat_asks) - 1
+        tag = "Claude needs your OK" + (f" · {waiting} more" if waiting else "")
+        self.say(title, seconds=3600, tag=tag, detail=details or None, accent=ACCENT,
+                 buttons=buttons, width=250, owner="request")
+
+    def show_details(self, request):
+        self.close_details()
+        title, details = blip_session.describe_request(request, self.chat_folder())
+        request["seen"] = True
+
+        def closed():
+            self.details_box = None
+
+        colors, fonts = self.chat_style()
+        self.details_box = blip_chat.DetailsWindow(
+            self.root, colors, fonts, title, details, closed)
+
+    def close_details(self):
+        if self.details_box:
+            self.details_box.close()
+
+    def answer_request(self, request, allow):
+        if not self.chat_turn or request not in self.chat_asks:
+            return
+        if allow and time.time() - self.bubble_shown_at_click < CHAT_GUARD:
+            self.show_request()  # too quick to have been read
+            return
+        self.chat_asks.remove(request)
+        self.close_details()
+        self.chat_turn.answer(request, allow)
+        self.phone_until = self.wave_until = 0.0
+        self.chat_progress = "Carrying on…" if allow else "Okay, I told Claude no."
+        self.show_chat_status()
+
+    def stop_chat(self):
+        if self.chat_turn:
+            self.close_details()
+            self.chat_asks = []
+            self.chat_turn.stop()
+
+    def take_chat(self, now):
+        """Handle what Claude sent back, and keep Blip looking busy meanwhile."""
+        while not self.door:
+            try:
+                turn, kind, value = self.chat_events.get_nowait()
+            except queue.Empty:
+                break
+            if turn is self.chat_turn:
+                self.chat_event(turn, kind, value)
+        if not self.chat_turn or self.door or self.dragging or self.air > 0 or self.leap:
+            return
+        if self.chat_asks:
+            # A request must not get lost behind another card: bring it back.
+            if not self.bubble_until and not self.menu_open and not self.details_box:
+                self.show_request()
+        elif self.act is None and not self.ask_box and not self.skill:
+            self.act, self.act_start = "wait", now
+
+    def chat_event(self, turn, kind, value):
+        if kind == "started":
+            if not self.chat_started:
+                self.chat_started = True
+                self.save()
+        elif kind == "progress":
+            self.chat_progress = value + "…"
+            if self.card_owner == "chat" and not self.chat_asks:  # not if you closed it
+                self.show_chat_status()
+        elif kind == "permission":
+            self.chat_asks.append(value)
+            if self.act == "wait":
+                self.act = None
+            self.jump()
+            self.mood("curious", 3)
+            if len(self.chat_asks) == 1:
+                self.show_request()
+            self.phone_until = time.time() + PHONE_SECONDS
+            self.wave_until = time.time() + 8
+        elif kind == "cancel":
+            first = self.chat_asks[:1]
+            self.chat_asks = [r for r in self.chat_asks if r["id"] != value]
+            if first != self.chat_asks[:1]:
+                self.close_details()
+                self.show_chat_status()
+        else:
+            self.end_turn(turn, kind, value)
+
+    def end_turn(self, turn, kind, value):
+        self.chat_turn, self.chat_asks = None, []
+        self.close_details()
+        if self.act == "wait" and not self.lines.waiting and not self.drafting:
+            self.act = None
+        self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
+        self.phone_until = self.wave_until = 0.0
+        if kind == "error":
+            exe = find_claude()
+            if exe and turn.resume and blip_session.NO_CONVERSATION in value:
+                # The saved chat is gone (deleted, or never got going): start afresh.
+                self.chat_session, self.chat_started = str(uuid.uuid4()), False
+                self.chat_ids.add(self.chat_session)
+                self.save()
+                self.start_turn(exe)
+                return
+            if exe and not turn.resume and "already in use" in value:
+                self.chat_started = True
+                self.save()
+                self.start_turn(exe)
+                return
+            log.warning("chat with Claude failed: %s", value)
+            self.ask_draft = self.ask_draft or self.chat_message
+            self.mood("sad", 5)
+            self.say("Claude didn't answer. Your message is still in the box.",
+                     seconds=20, tag="Claude", detail=" ".join(value.split())[:160],
+                     buttons=[("Try again", self.open_ask)], width=250)
+        elif kind == "stopped":
+            self.ask_draft = self.ask_draft or self.chat_message
+            self.say("Stopped.", seconds=4, tag="Claude")
+        else:
+            self.chat_reply = value
+            self.jump()
+            self.mood("happy", 2.5)
+            self.show_reply()
+
+    def show_reply(self):
+        """Claude's last answer on a card, cut short if it's long."""
+        if self.chat_turn:
+            self.show_chat_status()
+            return
+        if not self.chat_reply:
+            self.say("No reply yet. Click me and ask something.", seconds=5, tag="Claude")
+            return
+        text = blip_session.plain(self.chat_reply)
+        lines = text.splitlines()
+        cut = len(text) > CHAT_CARD_CHARS or len(lines) > CHAT_CARD_LINES
+        if cut:
+            text = "\n".join(lines[:CHAT_CARD_LINES])[:CHAT_CARD_CHARS].rstrip() + "…"
+        self.say(text, seconds=min(150.0, max(25.0, len(text) * 0.15)),
+                 tag="Claude" + (" · more in the app" if cut else ""),
+                 buttons=[("Reply", self.open_ask),
+                          ("Open in Claude", self.open_chat_in_claude),
+                          ("Copy", self.copy_reply)],
+                 width=250, owner="reply")
+
+    def copy_reply(self):
+        self.put_on_clipboard(self.chat_reply)
+        self.say("Copied the whole reply.", seconds=3, tag="Claude")
+
+    def open_chat_in_claude(self):
+        exe = find_claude()
+        if not exe or not self.chat_started:
+            self.say("There's no chat to open yet. Ask me something first.", seconds=6,
+                     tag="Claude")
+            return
+        if self.chat_turn:
+            self.say("Let me finish this one first, then open it.", seconds=5, tag="Claude")
+            return
+        if self.ask_box:
+            self.ask_box.close()
+
+        def failed():
+            self.say("I couldn't open the Claude app. Details are in blip.log.",
+                     seconds=10, tag="Claude")
+
+        try:
+            proc = blip_session.open_in_app(exe, self.chat_session, self.chat_folder())
+        except OSError:
+            log.exception("could not open the Claude app")
+            failed()
+            return
+        self.say("Opening our chat in the Claude app…", seconds=4, tag="Claude")
+
+        def check(tries=0):
+            code = proc.poll()
+            if code is None and tries < 30:
+                self.root.after(1000, check, tries + 1)
+            elif code:
+                log.warning("claude --desktop exited %s", code)
+                failed()
+
+        self.root.after(1000, check)
+
+    def new_chat(self):
+        self.stop_chat()
+        self.chat_turn = None
+        if self.act == "wait" and not self.lines.waiting and not self.drafting:
+            self.act = None
+        self.chat_session, self.chat_started, self.chat_reply = "", False, ""
+        self.save()
+        reopen = self.ask_box is not None
+        if reopen:
+            self.ask_box.close()
+        self.say("Fresh start. The old chat is still in Claude's history.", seconds=5,
+                 tag="Claude")
+        if reopen:
+            self.open_ask()
+
+    def choose_folder(self):
+        picked = filedialog.askdirectory(
+            parent=self.root, initialdir=self.chat_folder(), mustexist=True,
+            title="Where should Claude work on your tasks?")
+        if not picked:
+            return
+        picked = os.path.abspath(picked)
+        if os.path.normcase(picked) == os.path.normcase(self.chat_folder()):
+            return
+        self.chat_dir = picked
+        self.new_chat()  # a Claude Code session belongs to one folder
+        self.say(f"Tasks now run in {picked}. I started a new chat there.",
+                 seconds=8, tag="Claude")
 
     # -- draft helper: rewrite whatever is on the clipboard
 
@@ -1959,7 +2322,7 @@ class Blip:
         except queue.Empty:
             return
         self.drafting = False
-        if self.act == "wait" and not self.lines.waiting:
+        if self.act == "wait" and not self.lines.waiting and not self.chat_turn:
             self.act = None
         chat = self.draft_chat if self.chat_open() else None
         if chat:
@@ -2289,6 +2652,7 @@ class Blip:
         return (self.act in (None, "download") and not self.door and not self.dragging
                 and self.air == 0 and not self.drafting and not self.hidden
                 and not self.menu_open and not self.clones and not self.leap
+                and not self.ask_box and not self.chat_turn
                 and now > self.bubble_until - 0.5 and not self.chat_open()
                 and not self.working_on_claude(now))
 
@@ -2338,6 +2702,9 @@ class Blip:
             return
         for clone in list(self.clones.values()):
             clone.retire()
+        if self.ask_box:
+            self.ask_box.close()
+        self.stop_chat()
         self.react("bye", seconds=1.5)
         self.root.after(600, lambda: self.leave(then=self.close))
 
@@ -2404,12 +2771,17 @@ class Blip:
 
     def hide_now(self):
         self.hidden = True
+        if self.ask_box:
+            self.ask_box.close()
         self.hush()
         self.root.withdraw()
         if self.chat_open():
             self.draft_chat.win.withdraw()
 
     def close(self):
+        if self.chat_turn:
+            self.chat_turn.stopped = True
+            self.chat_turn.kill()
         if getattr(self, "tray", None):
             self.tray.remove()
         self.alive = False
@@ -2525,7 +2897,8 @@ class Blip:
     def free_for_skill(self):
         return (self.act is None and not self.skill and not self.bubble_until
                 and not self.menu_open and not self.dragging and self.air == 0
-                and not self.vx and not self.leap and not self.door and not self.drafting)
+                and not self.vx and not self.leap and not self.door and not self.drafting
+                and not self.ask_box and not self.chat_turn)
 
     def run_skill(self, name):
         """Perform a skill now."""
@@ -2766,7 +3139,7 @@ class Blip:
                 and not self.bubble_until
                 and not self.menu_open and self.jump_started is None
                 and not self.dragging and self.air == 0 and not self.vx and not self.leap
-                and not self.door
+                and not self.door and not self.ask_box and not self.chat_turn
                 and now > self.next_antic)
 
     # -- animation
@@ -2837,7 +3210,7 @@ class Blip:
                                    right - self.w))
             return False
         walking = (self.mode == "walk" and self.act is None and not self.watching
-                   and not self.bubble_until and not self.menu_open
+                   and not self.bubble_until and not self.menu_open and not self.ask_box
                    and self.jump_started is None and grounded and not self.vx)
         if self.act == "skate" and grounded:
             self.x += self.direction * 170 * self.s * self.FRAME_MS / 1000
@@ -3988,6 +4361,9 @@ class Blip:
             except queue.Empty:
                 break
             kind, sid = event.get("hook_event_name"), str(event.get("session_id") or "")
+            if (sid in self.chat_ids and kind != "Say"
+                    and event.get("source") != "claude-desktop"):
+                continue  # Blip is already showing this one itself
             clone = self.clones.get(sid)
             if clone and self.claude_alerts.get():
                 clone.task_event(event)
@@ -4054,6 +4430,7 @@ class Blip:
         self.take_alerts()
         self.take_updates(now)
         self.take_draft_result()
+        self.take_chat(now)
         if any(c.task["state"] == "merging" for c in self.clones.values()):
             self.mode, self.mode_until = "rest", now + 1  # wait for it
 
@@ -4174,6 +4551,10 @@ class Blip:
         if self.parent is None:
             self.take_tray()
             self.take_hotkeys()
+            if self.hidden and self.chat_turn and any(
+                    kind in ("permission", "reply", "error")
+                    for _, kind, _ in list(self.chat_events.queue)):
+                self.toggle_hidden()  # Claude needs you, or has your answer
             if self.hidden or not self.alive:
                 return  # out through the door; the tray icon brings Blip back
         if self.parent:
@@ -4185,7 +4566,7 @@ class Blip:
             settled = self.lines.poll()
         if settled:
             kind, line, error = settled
-            if self.act == "wait" and not self.drafting:
+            if self.act == "wait" and not self.drafting and not self.chat_turn:
                 self.act = None
             if error:
                 self.mood("sad", 6)
@@ -4194,7 +4575,8 @@ class Blip:
             else:
                 self.mood("happy", 1.2)
                 self.say(line, tag=KIND_TAGS.get(kind, "Blip"))
-        elif self.act == "wait" and not self.lines.waiting and not self.drafting:
+        elif (self.act == "wait" and not self.lines.waiting and not self.drafting
+              and not self.chat_turn):
             self.act = None
 
         self.watching = self.watch_mouse()
@@ -4233,6 +4615,9 @@ class Blip:
             x += random.randint(-3, 3)
             y += random.randint(-2, 2)
         self.root.geometry(f"{self.w}x{self.h}+{x}+{y}")
+
+        if self.ask_box:
+            self.place_ask()
 
         if self.bubble_until:
             if now > self.bubble_until:

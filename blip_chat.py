@@ -1,6 +1,6 @@
-"""The draft helper's chat window: Blip's rewrites, your feedback, and a box to type in.
+"""Blip's windows for typing: the box that asks Claude, and the draft helper's chat.
 
-It only shows the conversation and reports what you do; blip.pyw asks Claude.
+The draft chat only shows the conversation and reports what you do; blip.pyw asks Claude.
 The conversation is a list of (who, text): "blip" is a rewrite, "you" is feedback and
 "note" is a message about the chat itself. The newest rewrite can be edited by hand.
 """
@@ -11,6 +11,176 @@ import tkinter as tk
 TITLE = "Blip · Draft helper"
 HINT = "Tell Blip what to change.   Enter sends · Shift+Enter adds a line"
 MAX_FEEDBACK = 2000
+ASK_HINT = "Enter sends · Esc closes"
+MAX_ASK = 20000
+ASK_LINES = (2, 8)       # the box grows from this many lines to this many
+
+
+class AskBox:
+    """A small card above Blip with a box for a question or a task."""
+
+    def __init__(self, master, colors, fonts, width, draft, on_send, links, on_close):
+        """colors: card, raised, border, text, muted, accent. fonts: body, small, tag.
+        links: [(label, action)] along the bottom. on_send(text) returns True if it
+        was taken. on_close(draft) gets whatever is left unsent."""
+        self.on_send, self.on_close = on_send, on_close
+        c = colors
+
+        win = self.win = tk.Toplevel(master)
+        win.title("Ask Claude through Blip")
+        win.overrideredirect(True)
+        win.configure(bg=c["border"])
+        win.attributes("-topmost", True)
+        win.bind("<Escape>", lambda e: self.close())
+        pad = max(6, width // 28)
+        card = tk.Frame(win, bg=c["card"])
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+
+        def label(row, text, command=None, color=None, font="small"):
+            item = tk.Label(row, text=text, font=fonts[font], bg=c["card"],
+                            fg=color or c["muted"], bd=0, cursor="hand2" if command else "")
+            if command:
+                item.bind("<Button-1>", lambda e: command())
+                item.bind("<Enter>", lambda e: item.config(fg=c["text"]))
+                item.bind("<Leave>", lambda e: item.config(fg=color or c["muted"]))
+            return item
+
+        head = tk.Frame(card, bg=c["card"])
+        head.pack(fill="x", padx=pad, pady=(pad // 2, 0))
+        label(head, "●", color=c["accent"], font="tag").pack(side="left")
+        label(head, "ASK CLAUDE", font="tag").pack(side="left", padx=(4, 0))
+        label(head, "×", self.close).pack(side="right")
+
+        # The text box fills a frame of a fixed pixel width, whatever the font.
+        holder = tk.Frame(card, bg=c["card"], width=width)
+        holder.pack(fill="x", padx=pad, pady=(4, 2))
+        self.entry = tk.Text(holder, wrap="word", height=ASK_LINES[0], width=1,
+                             font=fonts["body"], bg=c["raised"], fg=c["text"],
+                             insertbackground=c["text"], relief="flat", padx=8, pady=6,
+                             undo=True, highlightthickness=1,
+                             highlightbackground=c["border"], highlightcolor=c["accent"])
+        self.entry.pack(fill="x")
+        tk.Frame(card, bg=c["card"], width=width + 2 * pad, height=0).pack()
+        self.entry.insert("1.0", draft)
+        self.entry.edit_reset()
+        self.entry.bind("<Return>", self.on_return)
+        self.entry.bind("<KP_Enter>", self.on_return)
+        self.entry.bind("<KeyRelease>", lambda e: self.grow())
+
+        foot = tk.Frame(card, bg=c["card"])
+        foot.pack(fill="x", padx=pad, pady=(0, pad // 2))
+        label(foot, ASK_HINT).pack(side="left")
+        for text, command in reversed(links):
+            label(foot, text, command, color=c["accent"]).pack(side="right", padx=(8, 0))
+        self.anchor = None       # (centre x, bottom y, screen area)
+        self.round_corners()
+
+    def text(self):
+        return self.entry.get("1.0", "end-1c")
+
+    def grow(self):
+        if not self.alive():
+            return
+        shown = self.entry.count("1.0", "end", "displaylines")
+        lines = shown[0] if isinstance(shown, tuple) else (shown or 1)
+        height = min(max(lines, ASK_LINES[0]), ASK_LINES[1])
+        if height != int(self.entry.cget("height")):
+            self.entry.config(height=height)
+            if self.anchor:
+                self.place(*self.anchor)
+
+    def on_return(self, event):
+        if event.state & 0x1:  # Shift: a new line
+            self.win.after_idle(self.grow)
+            return None
+        message = self.text().strip()[:MAX_ASK]
+        if message and self.on_send(message):
+            self.entry.delete("1.0", "end")
+            self.close()
+        return "break"
+
+    def place(self, x, bottom, area):
+        """Sit centred on x with the lower edge at `bottom`, inside the screen."""
+        self.anchor = (x, bottom, area)
+        self.win.update_idletasks()
+        width, height = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+        left, top, right, floor = area
+        x = min(max(x - width // 2, left + 4), right - width - 4)
+        y = min(max(bottom - height, top + 4), floor - height - 4)
+        self.win.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
+
+    def top(self):
+        return self.win.winfo_y()
+
+    def alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def focus(self):
+        """Bring the box forward, ready for typing."""
+        self.win.deiconify()
+        self.win.lift()
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+            user32.SetForegroundWindow(hwnd)
+        except (OSError, tk.TclError, AttributeError):
+            pass
+        self.entry.focus_force()
+        self.grow()
+
+    def round_corners(self):
+        try:
+            self.win.update_idletasks()
+            hwnd, small = int(self.win.wm_frame(), 16), ctypes.c_int(2)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(small), 4)
+        except (OSError, ValueError, tk.TclError, AttributeError):
+            pass
+
+    def close(self):
+        if not self.alive():
+            return
+        left = self.text().strip()
+        self.win.destroy()
+        self.on_close(left)
+
+
+class DetailsWindow:
+    """What Claude wants to do, in full, so you can read it before you Allow it."""
+
+    def __init__(self, master, colors, fonts, title, text, on_close):
+        self.on_close = on_close
+        c = colors
+        win = self.win = tk.Toplevel(master)
+        win.title("Blip · " + title)
+        win.configure(bg=c["card"])
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        win.bind("<Escape>", lambda e: self.close())
+        tk.Label(win, text="Close this window, then choose Allow or Deny on Blip's card.",
+                 font=fonts["small"], bg=c["card"], fg=c["muted"],
+                 anchor="w").pack(side="bottom", fill="x", padx=12, pady=(4, 10))
+        bar = tk.Scrollbar(win)
+        bar.pack(side="right", fill="y", padx=(0, 4), pady=(10, 0))
+        box = tk.Text(win, wrap="char", width=70, height=22, font=("Consolas", 10),
+                      bg=c["raised"], fg=c["text"], relief="flat", padx=10, pady=8,
+                      highlightthickness=0, yscrollcommand=bar.set)
+        box.pack(side="left", fill="both", expand=True, padx=(12, 4), pady=(10, 0))
+        bar.config(command=box.yview)
+        box.insert("1.0", text)
+        box.config(state="disabled")
+        win.focus_force()
+
+    def close(self):
+        try:
+            if not self.win.winfo_exists():
+                return
+            self.win.destroy()
+        except tk.TclError:
+            return
+        self.on_close()
 
 
 class DraftChat:
