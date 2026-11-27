@@ -15,7 +15,7 @@ from PIL import Image, ImageGrab
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 random.seed(7)
 OUT = sys.argv[1] if len(sys.argv) > 1 else "docs/blip-demo.gif"
-SRC = r"D:\WORK\GITHUB\PERSONAL\Blip\blip.pyw"
+SRC = str(Path(__file__).resolve().parent.parent / "blip.pyw")
 loader = importlib.machinery.SourceFileLoader("blip", SRC)
 spec = importlib.util.spec_from_loader("blip", loader)
 blip = importlib.util.module_from_spec(spec)
