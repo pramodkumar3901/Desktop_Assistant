@@ -753,6 +753,8 @@ class Blip:
         self.button_font = tkfont.Font(family=family, size=9, weight="bold")
         self.tag_font = tkfont.Font(family=family, size=8, weight="bold")
         self.detail_font = tkfont.Font(family=family, size=10, slant="italic")
+        self.menu_font = tkfont.Font(family="Segoe UI", size=10)
+        self.menu_heading = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.card_size = (0, 0)
         self.bubble_shown_at = 0.0
         self.bubble_alpha = 1.0
@@ -816,8 +818,7 @@ class Blip:
 
     def build_menu(self, root):
         """Right-click menu, grouped: do something / Claude Code / Blip itself."""
-        font = ("Segoe UI", 10)
-        heading = ("Segoe UI", 9, "bold")
+        font, heading = self.menu_font, self.menu_heading  # sized per screen
 
         def submenu():
             return tk.Menu(self.menu, tearoff=0, font=font)
@@ -882,11 +883,26 @@ class Blip:
         factor = SIZE_FACTORS[self.size]
         return factor * CLONE_SCALE if self.parent else factor
 
+    def upx(self, value):
+        """Pixels for the cards and menu: the screen's scaling, whatever Blip's size."""
+        return int(round(value * self.ui))
+
     def fit_fonts(self):
-        """Shrink the little on-body labels along with Blip."""
-        f = self.size_factor()
-        self.small_font.configure(size=max(4, round(7 * f)))
-        self.effect_font.configure(size=max(6, round(12 * f)))
+        """Size every font in pixels for the screen Blip is on. Tk's point sizes follow
+        the main screen's scaling, so on a screen with different scaling text would
+        come out too big or too small. On-body labels also shrink with Blip."""
+        if not hasattr(self, "small_font"):
+            return  # still starting up
+
+        def pixels(font, points, scale, least):
+            font.configure(size=-max(least, round(points * scale * 96 / 72)))
+
+        for font, points in ((self.bubble_font, 11), (self.button_font, 9),
+                             (self.tag_font, 8), (self.detail_font, 10),
+                             (self.menu_font, 10), (self.menu_heading, 9)):
+            pixels(font, points, self.ui, 8)
+        pixels(self.small_font, 7, self.s, 5)
+        pixels(self.effect_font, 12, self.s, 8)
 
     def resize(self, size):
         if size not in SIZE_FACTORS or size == self.size:
@@ -904,10 +920,13 @@ class Blip:
 
     def set_scale(self, dpi):
         """Match the size to the screen's display scaling (and the chosen size)."""
+        self.ui = dpi / 96
         scale = dpi / 96 * self.size_factor()
         if abs(scale - self.s) < 0.01:
+            self.fit_fonts()
             return
         ratio, self.s = scale / self.s, scale
+        self.fit_fonts()
         self.w, self.h = self.px(210), self.px(185)
         self.canvas.config(width=self.w, height=self.h)
         self.pivot = (self.pivot[0] * ratio, self.pivot[1] * ratio)
@@ -1138,7 +1157,7 @@ class Blip:
         now = time.time()
         if seconds is None:
             seconds = max(4.0, 2.0 + len(text) * 0.08 + len(detail or "") * 0.03)
-        c, px = self.bubble_canvas, self.px
+        c, px = self.bubble_canvas, self.upx
         pad, gap, wrap = px(14), px(8), px(268)
         accent = accent or EYE
         c.delete("all")
@@ -1222,7 +1241,7 @@ class Blip:
 
     def place_bubble(self):
         """Keep the card above Blip, on screen, tail pointing at Blip, fading in."""
-        c, px = self.bubble_canvas, self.px
+        c, px = self.bubble_canvas, self.upx
         width, height = self.bubble_size
         card_w, card_h = self.card_size
         tail, r = px(10), px(14)
