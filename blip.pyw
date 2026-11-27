@@ -47,7 +47,7 @@ ICON_FILE = Path(__file__).with_name("blip.ico")
 
 # Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
 # v<VERSION>; every Blip finds it, downloads it and installs it.
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UPDATE_REPO = "pramodkumar3901/Desktop_Assistant"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_FIRST_CHECK = 45        # seconds after starting
