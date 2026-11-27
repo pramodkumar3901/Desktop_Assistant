@@ -43,11 +43,12 @@ The right-click menu, in three groups:
 | Menu | Holds |
 | --- | --- |
 | **Rewrite copied text** | Improve it, Make it shorter, More professional, Friendlier, Fix grammar only, Undo last rewrite |
-| **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random |
+| **Talk to me** | Encourage me, Say something funny, Check in on me, Do something random, Moonwalk for me |
 | **Claude Code** | Connected to Claude Code, Show alerts, A mini Blip for each extra session, What can you do?, Send a test alert |
 | **Look** | Accessory (Rotate, Nothing, Laptop, Phone, Music player, Coffee mug) and Size (Tiny, the default; Medium; Large) |
+| **Updates** | The version, Update automatically, Check for updates now |
 | **Quiet mode** | No random antics |
-| **Bye, Blip (quit)** | Closes Blip |
+| **Bye, Blip (quit)** | Walks out through a door and closes Blip |
 
 ## Draft helper
 
@@ -96,6 +97,35 @@ Every 25–70 seconds it does something on its own:
   **Yes please!** and **No thanks** buttons
 
 Tick **Quiet mode** in the right-click menu to stop the random antics.
+
+## Updates
+
+Blip keeps itself up to date from this repo's
+[GitHub releases](https://github.com/pramodkumar3901/Desktop_Assistant/releases). Shortly
+after it starts, and every 6 hours after that, it checks for a newer release:
+
+1. It says the new version is out and downloads it, with a progress bar over its laptop
+   (click Blip to see how far it's got).
+2. It waits until you're not busy: no draft, Claude session, mini Blips or open menu.
+3. It says it's installing, walks out through a door, swaps in the new files and
+   restarts.
+4. It walks back in through a door saying which version it is now, with the release's
+   first note.
+
+The download is checked before anything is replaced, and the old files are kept in
+`.update_backup/`. Your settings are never touched. If the folder is a **git clone**, Blip
+fast-forwards it to the release tag instead, but only when it's on `main` with no changes
+of yours. Otherwise it just tells you a new version is out, with a link to what's new.
+
+Right-click Blip → **Updates** shows the version, turns **Update automatically** off or on
+and has **Check for updates now**.
+
+**Making a release:** bump `VERSION` near the top of `blip.pyw`, merge it, then publish a
+release tagged to match:
+
+```
+gh release create v1.1.0 --title "Blip 1.1.0" --notes "- What changed, first line is what Blip says"
+```
 
 ## Needs
 

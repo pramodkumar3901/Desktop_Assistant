@@ -15,13 +15,19 @@ import math
 import os
 import queue
 import random
+import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
+import webbrowser
+import zipfile
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +41,18 @@ BACKGROUND_GAP = 10 * 60 # antics alone never ask Claude more often than this
 ANTIC_GAP = (25, 70)     # seconds between random antics
 LOG_FILE = Path(__file__).with_name("blip.log")
 ICON_FILE = Path(__file__).with_name("blip.ico")
+
+# Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
+# v<VERSION>; every Blip finds it, downloads it and installs it.
+VERSION = "1.0.0"
+UPDATE_REPO = "pramodkumar3901/Desktop_Assistant"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_FIRST_CHECK = 45        # seconds after starting
+UPDATE_EVERY = 6 * 60 * 60     # then this often
+APP_DIR = Path(__file__).resolve().parent
+UPDATE_NOTE = APP_DIR / "blip_update.json"   # tells the new version it was just installed
+UPDATE_BACKUP = APP_DIR / ".update_backup"
+UPDATE_KEEP = {"blip_settings.json", "blip_alerts.json", "blip.log", "blip_update.json"}
 SETTINGS_FILE = Path(__file__).with_name("blip_settings.json")
 # Where Blip tells blip_hook.py how to reach it: a random port and a secret token.
 ALERTS_FILE = Path(__file__).with_name("blip_alerts.json")
@@ -505,6 +523,152 @@ def raise_overlay(window):
                         NOSIZE | NOMOVE | NOACTIVATE)
 
 
+def parse_version(text):
+    numbers = [int(n) for n in re.findall(r"\d+", str(text))[:3]]
+    return tuple(numbers + [0] * (3 - len(numbers)))
+
+
+def git_run(*args):
+    return subprocess.run(["git", "-C", str(APP_DIR), *args], capture_output=True,
+                          text=True, timeout=120, creationflags=0x08000000)
+
+
+class Updater:
+    """Looks for a newer GitHub release in the background and gets it ready.
+
+    A copy unpacked from a zip downloads the release and swaps its files in. A git
+    checkout only fast-forwards, and only when it's on main with no local changes;
+    otherwise Blip just says a new version is out. Results arrive on `events`:
+    ("found", info), ("progress", 0..1), ("ready", info, staged folder or None),
+    ("manual", info, why), ("latest", None) and ("error", message)."""
+
+    def __init__(self):
+        self.events = queue.Queue()
+        self.busy = False
+
+    def check(self, manual=False):
+        if self.busy:
+            return
+        self.busy = True
+        threading.Thread(target=self._check, args=(manual,), daemon=True).start()
+
+    def _check(self, manual):
+        try:
+            request = urllib.request.Request(UPDATE_API, headers={
+                "User-Agent": "Blip-updater", "Accept": "application/vnd.github+json"})
+            try:
+                with urllib.request.urlopen(request, timeout=20) as reply:
+                    release = json.load(reply)
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+                release = {}  # no release published yet
+            tag = release.get("tag_name") or ""
+            if (release.get("draft") or release.get("prerelease")
+                    or parse_version(tag) <= parse_version(VERSION)):
+                if manual:
+                    self.events.put(("latest", None))
+                return
+            notes = [line.strip(" *-") for line in (release.get("body") or "").splitlines()
+                     if not line.lstrip().startswith("#")]  # skip headings
+            info = {"tag": tag, "version": ".".join(map(str, parse_version(tag))),
+                    "title": release.get("name") or tag,
+                    "headline": next((n for n in notes if n), ""),
+                    "url": release.get("html_url") or "", "zip": release.get("zipball_url")}
+            if (APP_DIR / ".git").exists():
+                why = self.git_blocker()
+                if why:
+                    self.events.put(("manual", info, why))
+                    return
+                self.events.put(("found", info))
+                fetched = git_run("fetch", "--quiet", "origin", "tag", tag)
+                if fetched.returncode:
+                    raise RuntimeError(fetched.stderr.strip() or "git fetch failed")
+                self.events.put(("ready", info, None))
+                return
+            self.events.put(("found", info))
+            self.events.put(("ready", info, self.download(info)))
+        except Exception as error:
+            log.warning("update check failed: %s", error)
+            if manual:
+                self.events.put(("error", str(error)))
+        finally:
+            self.busy = False
+
+    def git_blocker(self):
+        """Why a git checkout can't update itself, or None when it can."""
+        if not shutil.which("git"):
+            return "Git isn't installed, so update this copy yourself."
+        branch = git_run("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if branch != "main":
+            return f"This copy is on the {branch} branch, so I'll leave updating to you."
+        if git_run("status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return "This copy has changes of yours, so I'll leave updating to you."
+        return None
+
+    def download(self, info):
+        """Fetch the release zip with progress, unpack it and check it's really Blip."""
+        work = Path(tempfile.mkdtemp(prefix="blip-update-"))
+        archive = work / "release.zip"
+        request = urllib.request.Request(info["zip"], headers={"User-Agent": "Blip-updater"})
+        with urllib.request.urlopen(request, timeout=60) as reply, open(archive, "wb") as out:
+            total = int(reply.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = reply.read(64 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                guess = done / total if total else 1 - math.exp(-done / 400_000)
+                self.events.put(("progress", min(0.99, guess)))
+        with zipfile.ZipFile(archive) as z:
+            for name in z.namelist():  # never write outside the folder
+                if name.startswith("/") or ".." in Path(name).parts:
+                    raise RuntimeError(f"unsafe path in the release: {name}")
+            z.extractall(work / "unpacked")
+        tops = [d for d in (work / "unpacked").iterdir() if d.is_dir()]
+        top = tops[0] if len(tops) == 1 else work / "unpacked"
+        source = (top / "blip.pyw").read_text(encoding="utf-8")
+        compile(source, "blip.pyw", "exec")  # a broken download never gets installed
+        self.events.put(("progress", 1.0))
+        return top
+
+    def apply(self, info, staged):
+        """Install a ready update. True when it went in."""
+        try:
+            if staged is None:  # git checkout: fast-forward to the release
+                merged = git_run("merge", "--ff-only", "--quiet", f"refs/tags/{info['tag']}")
+                if merged.returncode:
+                    raise RuntimeError(merged.stderr.strip() or "git merge failed")
+            else:
+                backup = UPDATE_BACKUP / VERSION
+                for path in staged.rglob("*"):
+                    rel = path.relative_to(staged)
+                    if path.is_dir() or rel.parts[0] == ".git" or rel.name in UPDATE_KEEP:
+                        continue
+                    target = APP_DIR / rel
+                    if target.exists():
+                        (backup / rel).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(target, backup / rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, target)
+            UPDATE_NOTE.write_text(json.dumps({"version": info["version"], "from": VERSION,
+                                               "title": info["title"],
+                                               "headline": info["headline"]}),
+                                   encoding="utf-8")
+            return True
+        except Exception:
+            log.exception("could not install the update")
+            return False
+
+
+def restart_blip():
+    """Start the freshly installed Blip; it waits for this one to close."""
+    subprocess.Popen([sys.executable, str(APP_DIR / "blip.pyw"), "--updated"], cwd=APP_DIR,
+                     creationflags=subprocess.DETACHED_PROCESS | 0x08000000)
+
+
 class Tray:
     """Blip's icon in the notification area (system tray), through the Windows
     shell API. Clicks are queued as "left" / "right" for Blip's frame loop: Tk
@@ -928,10 +1092,17 @@ class Blip:
             self.size_var.trace_add("write", lambda *_: self.resize(self.size_var.get()))
             self.hidden = False
             self.tray_events = queue.Queue()
+            self.updater = Updater()
+            self.auto_update = tk.BooleanVar(value=bool(settings.get("auto_update", True)))
+            self.auto_update.trace_add("write", lambda *_: self.save())
+            self.next_update_check = time.time() + UPDATE_FIRST_CHECK
+            self.pending_update = None   # (info, staged) once downloaded
+            self.update_progress = None
+            self.update_version = ""
             self.build_menu(root)
             self.tray = None
             try:
-                self.tray = Tray(ICON_FILE, "Blip", self.tray_events)
+                self.tray = Tray(ICON_FILE, f"Blip {VERSION}", self.tray_events)
             except Exception:
                 log.exception("could not add the tray icon")
             self.save()
@@ -958,7 +1129,7 @@ class Blip:
 
         if parent is None:
             self.lines.refill()
-            self.enter()
+            self.enter(then=self.greet_after_update)
         self.tick()
 
     def build_menu(self, root):
@@ -1019,6 +1190,11 @@ class Blip:
         for key, label in SIZES:
             look.add_radiobutton(label=label, value=key, variable=self.size_var)
         menu.add_cascade(label="Look", menu=look)
+        updates = submenu()
+        updates.add_command(label=f"Blip version {VERSION}", state="disabled", font=heading)
+        updates.add_checkbutton(label="Update automatically", variable=self.auto_update)
+        updates.add_command(label="Check for updates now", command=self.check_updates)
+        menu.add_cascade(label="Updates", menu=updates)
         menu.add_checkbutton(label="Quiet mode (no random antics)", variable=self.quiet)
         menu.add_command(label="Bye, Blip (quit)", command=self.quit)
 
@@ -1172,12 +1348,17 @@ class Blip:
             self.next_antic = time.time() + random.uniform(*ANTIC_GAP)
             self.say(random.choice(WOKEN))
             return
+        if self.act == "download":
+            self.say(f"Downloading version {self.update_version}: "
+                     f"{int((self.update_progress or 0) * 100)}% so far.", tag="Update")
+            return
         self.speak("encourage")
 
     def save(self):
         save_settings({"accessory": self.accessory, "quiet": self.quiet.get(),
                        "claude_alerts": self.claude_alerts.get(), "size": self.size,
-                       "session_clones": self.clones_on.get()})
+                       "session_clones": self.clones_on.get(),
+                       "auto_update": self.auto_update.get()})
 
     def put_on(self, accessory):
         self.accessory = accessory
@@ -1823,6 +2004,101 @@ class Blip:
             self.canvas.create_rectangle(line, -5, self.w + 5, self.h + 5, fill=TRANSPARENT,
                                          outline=TRANSPARENT)
 
+    # -- updates
+
+    def check_updates(self):
+        self.say("Checking for a newer me...", seconds=3, tag="Update")
+        self.updater.check(manual=True)
+        self.next_update_check = time.time() + UPDATE_EVERY
+
+    def take_updates(self, now):
+        """Look for releases now and then; follow the download; install when idle."""
+        if self.auto_update.get() and now > self.next_update_check:
+            self.next_update_check = now + UPDATE_EVERY
+            self.updater.check()
+        while True:
+            try:
+                event = self.updater.events.get_nowait()
+            except queue.Empty:
+                break
+            kind, info = event[0], event[1]
+            if kind == "found":
+                self.update_version, self.update_progress = info["version"], 0.0
+                self.say(f"Version {info['version']} is out! Downloading it now.",
+                         seconds=4, tag="Update", accent=ACCENT)
+                self.show_download(now)
+            elif kind == "progress":
+                self.update_progress = info
+                self.show_download(now)
+            elif kind == "ready":
+                self.update_progress = 1.0
+                self.pending_update = (info, event[2])
+                if (self.drafting or self.clones or self.hidden
+                        or self.working_on_claude(now)):
+                    if self.act == "download":
+                        self.act = None
+                    self.say(f"Version {info['version']} is downloaded. I'll install it "
+                             "when you're not busy.", seconds=5, tag="Update", accent=ACCENT)
+            elif kind == "manual":
+                self.say(f"Version {info['version']} is out: {info['title']}.", seconds=10,
+                         tag="Update", detail=event[2], accent=ACCENT,
+                         buttons=[("What's new", lambda u=info["url"]: webbrowser.open(u))])
+            elif kind == "latest":
+                self.say(f"You're on the latest version ({VERSION}). Shiny!", tag="Update")
+            elif kind == "error":
+                self.say("I couldn't reach GitHub to check for updates just now.",
+                         tag="Update")
+        if self.pending_update and self.idle_for_update(now):
+            self.start_install(now)
+
+    def show_download(self, now):
+        if self.act is None and not self.door and not self.dragging and self.air == 0:
+            self.act, self.act_start, self.act_end = "download", now, float("inf")
+
+    def idle_for_update(self, now):
+        """Only install when nothing would be interrupted."""
+        return (self.act in (None, "download") and not self.door and not self.dragging
+                and self.air == 0 and not self.drafting and not self.hidden
+                and not self.menu_open and not self.clones and not self.leap
+                and now > self.bubble_until - 0.5 and not self.working_on_claude(now))
+
+    def start_install(self, now):
+        info, staged = self.pending_update
+        self.pending_update = None
+        self.act = None
+        self.update_progress = None
+        self.mood("excited", 2)
+        self.say(f"Version {info['version']} is ready! Installing it, back in a moment.",
+                 seconds=2.2, tag="Update", accent=ACCENT)
+        self.root.after(1800, lambda: self.leave(then=lambda: self.install(info, staged)))
+
+    def install(self, info, staged):
+        """Out of sight behind the door: swap in the new version and restart."""
+        if self.updater.apply(info, staged):
+            try:
+                restart_blip()
+                self.close()
+                return
+            except OSError:
+                log.exception("could not restart after the update")
+        self.enter(then=lambda: self.say(
+            f"Hmm, that update didn't go in. I'm still version {VERSION}. "
+            "Details are in blip.log.", seconds=6, tag="Update"))
+
+    def greet_after_update(self):
+        """Just installed a new version? Say so on the way in."""
+        try:
+            note = json.loads(UPDATE_NOTE.read_text(encoding="utf-8"))
+            UPDATE_NOTE.unlink()
+        except (OSError, ValueError):
+            return
+        if note.get("version") != ".".join(map(str, parse_version(VERSION))):
+            return
+        self.jump()
+        self.mood("excited", 3)
+        self.say(f"I'm back, and I'm version {VERSION} now!", seconds=8, tag="Updated",
+                 detail=note.get("headline") or note.get("title"), accent=ACCENT)
+
     def quit(self):
         """Say bye and leave through a door, then close."""
         if self.door and self.door["kind"] == "out":
@@ -1981,14 +2257,14 @@ class Blip:
         distance = math.hypot(dx, dy)
         # Slightly larger radius to let go than to notice, so it doesn't flicker.
         near = distance < self.px(260 if self.watching else 220)
-        if near and self.act not in ("think", "wait", "update"):
+        if near and self.act not in ("think", "wait", "update", "download"):
             reach = min(1.0, distance / self.px(40)) / (distance or 1)
             target = (dx * reach, dy * reach)
         elif self.current_prop(time.time()) == "laptop":
             target = (0.9, 0.9)  # eyes down on the laptop screen
         elif self.act in ("think", "wait"):
             target = (0.7, -0.9)
-        elif self.act == "update":
+        elif self.act in ("update", "download"):
             target = (0.0, -1.0)
         elif self.act == "moonwalk":
             target = (0.8 * self.direction, 0.05)
@@ -2062,7 +2338,7 @@ class Blip:
             return "surprised"
         if act in ("nap", "glitch", "spin"):
             return {"nap": "sleep", "glitch": "glitch", "spin": "spin"}[act]
-        if act in ("think", "wait", "update"):
+        if act in ("think", "wait", "update", "download"):
             return "think"
         if act == "emote":
             return self.emote_face
@@ -2245,7 +2521,7 @@ class Blip:
                       fill=mix(SHELL, "#000000", 0.45), outline="")
         if act == "glitch":
             light = random.choice(GLITCH_COLORS)
-        elif act in ("think", "wait", "spin", "update"):
+        elif act in ("think", "wait", "spin", "update", "download"):
             light = ACCENT if int(now * 6) % 2 else ACCENT_DIM
         elif act == "nap":
             light = ACCENT_DIM
@@ -2499,7 +2775,7 @@ class Blip:
         if (self.dragging or self.air > 0 or self.leap
                 or act in ("nap", "skate", "glitch", "spin")):
             return None
-        if self.drafting or act in ("wait", "think", "update"):
+        if self.drafting or act in ("wait", "think", "update", "download"):
             return "laptop"  # working on something
         if now < self.phone_until:
             return "phone"  # a Claude Code alert came in
@@ -2549,7 +2825,7 @@ class Blip:
                 return
             # Standing still: open on the floor beside Blip, seen side-on, screen
             # tilted toward Blip, which leans over and types with its right hand.
-            working = (self.drafting or self.act in ("wait", "think", "update")
+            working = (self.drafting or self.act in ("wait", "think", "update", "download")
                        or self.working_on_claude(now))
             typing = working or now % 6 < 2.5  # idle: types in little bursts
             deck_y = ground - 4.5 * s
@@ -2927,8 +3203,11 @@ class Blip:
                 c.create_text(cx + side * (22 + phase * 10) * s, head_y + 10 * s - phase * 45 * s,
                               text="♪" if k else "♫", fill=BODY_DARK,
                               font=self.effect_font)
-        elif act == "update":
-            progress = 1.0 if t > 5.3 else min(0.99, (t / 4.2) ** 0.6)
+        elif act in ("update", "download"):
+            if act == "download":
+                progress = self.update_progress or 0.0
+            else:
+                progress = 1.0 if t > 5.3 else min(0.99, (t / 4.2) ** 0.6)
             bx1, bx2 = cx - 36 * s, cx + 36 * s
             by1, by2 = head_y - 18 * s, head_y - 9 * s
             rrect(c, bx1, by1, bx2, by2, 4 * s, fill="white", outline=BODY_DARK, width=1)
@@ -2936,7 +3215,9 @@ class Blip:
                 rrect(c, bx1 + 1.5 * s, by1 + 1.5 * s,
                       bx1 + 1.5 * s + (bx2 - bx1 - 3 * s) * progress, by2 - 1.5 * s,
                       3 * s, fill=EYE, outline="")
-            c.create_text(cx, by1 - 7 * s, text=f"updating {int(progress * 100)}%",
+            label = (f"v{self.update_version} {int(progress * 100)}%" if act == "download"
+                     else f"updating {int(progress * 100)}%")
+            c.create_text(cx, by1 - 7 * s, text=label,
                           fill=BODY_DARK, font=self.small_font)
 
     def tick(self):
@@ -3069,8 +3350,9 @@ class Blip:
     # -- session clones
 
     def main_step(self, now):
-        """Main Blip's inputs: Claude Code events, drafts and the hotkey."""
+        """Main Blip's inputs: Claude Code events, drafts, the hotkey and updates."""
         self.take_alerts()
+        self.take_updates(now)
         self.take_draft_result()
         while True:
             try:
@@ -3272,15 +3554,25 @@ class Blip:
 
 
 def already_running():
-    ctypes.windll.kernel32.CreateMutexW(None, False, "BlipDesktopPet")
-    return ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    kernel = ctypes.windll.kernel32
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateMutexW(None, False, "BlipDesktopPet")
+    if kernel.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel.CloseHandle(handle)  # don't keep the other Blip's mutex alive
+        return True
+    return False  # keep the handle: it marks this Blip as the running one
 
 
 def main():
     logging.basicConfig(filename=LOG_FILE, level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
-    if already_running():
-        return
+    waited = 0.0
+    while already_running():
+        if "--updated" not in sys.argv or waited > 20:
+            return
+        time.sleep(0.5)  # just updated: wait for the old version to close
+        waited += 0.5
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # true pixels on every screen
     except (AttributeError, OSError):
