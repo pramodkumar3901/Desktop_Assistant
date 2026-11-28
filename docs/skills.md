@@ -60,7 +60,7 @@ Each step has exactly one of these:
 | Step | Meaning |
 |---|---|
 | `{"move": "cheer"}` | Perform a move from `moves` (or write the move right there). |
-| `{"act": "dance"}` | One of Blip's own: `think`, `glitch`, `nap`, `dance`, `update`, `spin`, `skate`, `moonwalk`, `lean`. |
+| `{"act": "dance"}` | One of Blip's own: `think`, `glitch`, `nap`, `dance`, `update`, `spin`, `skate`, `moonwalk`, `lean`, `skip` (a skipping rope). |
 | `{"say": ["one", "two"]}` | Say one of these lines. Add `"seconds"` to set how long it waits. |
 | `{"mood": "love", "seconds": 3}` | Show a face. |
 | `{"jump": true}` | Hop. |

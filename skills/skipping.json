@@ -1,0 +1,7 @@
+{
+  "name": "Skipping",
+  "when": { "random": 1.2 },
+  "do": [
+    { "act": "skip" }
+  ]
+}

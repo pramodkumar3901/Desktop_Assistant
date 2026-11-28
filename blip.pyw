@@ -57,7 +57,7 @@ SKILL_WAIT = 10 * 60     # a triggered skill that can't run for this long is dro
 
 # Releases and updates. Bump VERSION, merge, then publish a GitHub release tagged
 # v<VERSION>; every Blip finds it, downloads it and installs it.
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 UPDATE_REPO = "pramodkumar3901/Desktop_Assistant"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_FIRST_CHECK = 45        # seconds after starting
@@ -99,7 +99,7 @@ HUMOURS = [
     ("punny", "Punny", "puns and wordplay, groan-worthy on purpose"),
     ("mixed", "Mixed (a bit of everything)", None),
 ]
-DEFAULT_HUMOUR = "gentle"
+DEFAULT_HUMOUR = "mixed"
 
 
 def humour_brief(key):
@@ -163,11 +163,20 @@ MOONWALK_DONE = ["Walking forward is so last version.",
                  "Zero friction. All style.",
                  "I've been practising that on the taskbar for weeks."]
 
-# name, weight, seconds
+SKIP_DONE = ["Skipping practice complete. The rope and I are still friends.",
+             "Cardio done. My battery is breathing heavily.",
+             "Not one trip. Please tell everyone.",
+             "I skipped. Unlike your updates, I never skip those."]
+
+SKIP_TURN = 0.62         # seconds for one turn of the skipping rope
+SKIP_HOP = 14            # how high a hop goes, in unscaled pixels
+SKIP_AIR = 0.28          # share of a turn, each side of the rope's low point, spent in the air
+
+# name, weight, seconds (skipping has no weight: skills/skipping.json says how often)
 ANTICS = [("think", 3.0, 3.0), ("glitch", 1.5, 1.4), ("nap", 1.0, 10.0),
           ("dance", 1.5, 4.5), ("update", 1.0, 6.5), ("spin", 1.0, 3.0),
           ("suggest", 1.8, 0.0), ("skate", 1.5, 6.0), ("emote", 2.5, 3.0),
-          ("moonwalk", 1.2, 5.5), ("lean", 1.6, 0.0)]
+          ("moonwalk", 1.2, 5.5), ("lean", 1.6, 0.0), ("skip", 0.0, SKIP_TURN * 10)]
 LEAN_DONE = ["Corner break over. Back to being helpful!",
              "That wall is surprisingly comfy.",
              "Rested my circuits. Where were we?"]
@@ -299,6 +308,7 @@ REACTIONS = {
     "spin_done": ("right after Blip's eyes spun like a loading spinner", SPIN_DONE),
     "dance_done": ("right after a little dance", DANCE_DONE),
     "skate_done": ("after a skateboard ride across the screen", SKATE_DONE),
+    "skip_done": ("right after skipping with a skipping rope", SKIP_DONE),
     "moonwalk_done": ("after a slick backwards moonwalk", MOONWALK_DONE),
     "leaped": ("after leaping across to another monitor", LEAPED),
     "landed": ("after being dropped and landing a bit dizzy", LANDED),
@@ -3128,6 +3138,9 @@ class Blip:
         elif name == "dance" and random.random() < 0.6:
             self.mood("happy", 2)
             self.react("dance_done")
+        elif name == "skip" and random.random() < 0.7:
+            self.mood("happy", 2)
+            self.react("skip_done")
         elif name == "moonwalk":
             self.jump()  # a little hop to finish
             self.mood("smug", 2.5)
@@ -3266,7 +3279,7 @@ class Blip:
             return "think"
         if act == "emote":
             return self.emote_face
-        if act in ("dance", "skate"):
+        if act in ("dance", "skate", "skip"):
             return "happy"
         if act == "moonwalk":
             return "smug"
@@ -3338,8 +3351,9 @@ class Blip:
             bob = abs(math.sin(self.step)) * 0.5
         else:
             bob = 0.0
-        resting = (not walking and act not in ("dance", "skate", "moonwalk")
+        resting = (not walking and act not in ("dance", "skate", "skip", "moonwalk")
                    and not airborne)
+        skipping = act == "skip" and not airborne
         sleepy = act == "nap" or self.lean_resting() == "doze"
         breathe = math.sin(now * (1.2 if sleepy else 2.2)) * (1.8 if sleepy else 1) \
             if resting else 0.0
@@ -3620,6 +3634,8 @@ class Blip:
                 high = body_top + 7 * s
                 self.draw_limb(c, side, shoulder, high, shoulder + side * out * s,
                                high - up * s)
+        if skipping:
+            self.draw_skipping(c, t, cx, bx1, bx2, body_top, ground)
         if pose.get("roll"):  # the whole body leans from its feet
             self.rotate_all(cx, ground, math.radians(pose["roll"]))
 
@@ -3627,6 +3643,51 @@ class Blip:
         self.draw_mood_effects(c, now, cx, self.head_y, self.face_now)
         if abs(self.swing) > 0.002:
             self.rotate_all(*self.pivot, self.swing)
+
+    def draw_skipping(self, c, t, cx, bx1, bx2, body_top, ground):
+        """The skipping rope. It turns over Blip's head, comes down in front, passes
+        under its feet as it hops, and goes back up behind."""
+        s, px = self.s, self.px
+        turn = (t / SKIP_TURN) % 1  # 0: rope at the top, 0.5: under the feet
+        low = -math.cos(2 * math.pi * turn)  # -1 at the top, 1 at the bottom
+        off = (turn - 0.5) / SKIP_AIR
+        hop = SKIP_HOP * s * max(0.0, 1 - off * off)
+
+        hands = []
+        wrist = 2 * math.pi * turn  # the hands draw little circles that drive the rope
+        shoulder = body_top + 7 * s
+        for side, edge in ((-1, bx1 + 1 * s), (1, bx2 - 1 * s)):
+            hx = edge + side * (22 + 2.5 * math.sin(wrist)) * s
+            hy = shoulder + (7 + 3 * low) * s
+            self.draw_limb(c, side, edge, shoulder, hx, hy)
+            hands.append((hx, hy))
+        c.move("all", 0, -hop)  # all of Blip goes up; the rope still reaches the floor
+
+        (left, left_y), (right, right_y) = hands
+        left_y, right_y = left_y - hop, right_y - hop
+        top = body_top - 96 * s - hop  # clear above the headphones
+        bottom = ground - 0.5 * s
+        hand_y = (left_y + right_y) / 2
+        reach = (top - hand_y) if low < 0 else (bottom - hand_y)
+        middle = hand_y + reach * abs(low)
+        centre, half = (left + right) / 2, (right - left) / 2
+        points = []
+        for i in range(25):
+            a = math.pi * i / 24
+            bow = math.sin(a) ** 0.45 if 0 < i < 24 else 0.0
+            points += [centre - math.cos(a) * (half + 24 * s * math.sin(a)),
+                       left_y + (right_y - left_y) * i / 24 + (middle - hand_y) * bow]
+        ropes = [c.create_line(*points, fill=color, width=wide, smooth=True,
+                               capstyle="round")
+                 for color, wide in ((OUTLINE, max(4, px(4.6))), (ACCENT, max(2, px(2.6))))]
+        if turn >= 0.5:  # on its way back up: behind Blip
+            for item in reversed(ropes):
+                c.tag_lower(item)
+        for hx, hy in ((left, left_y), (right, right_y)):  # the grips, in its mitts
+            c.create_line(hx, hy - 5 * s, hx, hy + 5 * s, fill=OUTLINE,
+                          width=max(5, px(6.5)), capstyle="round")
+            c.create_line(hx, hy - 4.5 * s, hx, hy + 4.5 * s, fill=SLIDER,
+                          width=max(3, px(4)), capstyle="round")
 
     def tiptoe_foot(self, c, fx, ground, lw):
         """A foot tipped up onto its toe, toe pointing the way Blip faces."""
@@ -3735,7 +3796,7 @@ class Blip:
                     or any(k.startswith("hand") for k in self.pose)):
                 return None  # the move needs both hands
         if (self.dragging or self.air > 0 or self.leap
-                or act in ("nap", "skate", "glitch", "spin")):
+                or act in ("nap", "skate", "skip", "glitch", "spin")):
             return None
         if self.drafting or act in ("wait", "think", "update", "download"):
             return "laptop"  # working on something
