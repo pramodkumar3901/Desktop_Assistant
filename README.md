@@ -154,8 +154,8 @@ Tick **Quiet mode** in the right-click menu to stop the random antics.
 
 Blip can learn new dances, moves and routines without an update. Each one is a small JSON
 file: drop it in `my_skills` (right-click Blip, **Skills**, **Open my skills folder**) and
-Blip picks it up while running. It comes with **The Robot**, **Disco**, **Floss**,
-**Big wave** and **Stretch break**. A skill can run from the menu, at random, on a timer, at
+Blip picks it up while running. It comes with **Skipping** (ten turns of a skipping
+rope), **The Robot**, **Disco**, **Floss**, **Big wave** and **Stretch break**. A skill can run from the menu, at random, on a timer, at
 a time of day or when Claude Code finishes. Skills are data, never code.
 See [docs/skills.md](docs/skills.md) to write one, or ask Claude to write it for you.
 
@@ -199,9 +199,9 @@ gh release create v1.1.0 --title "Blip 1.1.0" --notes "- What changed, first lin
 - One call fetches 4 lines of each kind, plus 3 for each reaction (after a moonwalk, a
   parachute landing, waking up, walking in through the door...), in about 30–40 seconds.
   Until they arrive, reactions use built-in lines.
-- **Humour** (right-click → **Talk to me → Humour**): Gentle (the default), Nerdy, Absurd,
-  Dry, Punny, or **Mixed**, which picks a style at random for each line and sometimes blends
-  two. Changing it fetches a fresh batch and tells you a joke in the new style.
+- **Humour** (right-click → **Talk to me → Humour**): **Mixed** (the default), which picks
+  a style at random for each line and sometimes blends two, or just one of Gentle, Nerdy,
+  Absurd, Dry or Punny. Changing it fetches a fresh batch and tells you a joke in the new style.
 - Blip remembers the last 60 things it said (`blip_recent.json`) and asks Claude not to
   repeat them or reuse their jokes, and drops any line that does.
 - A call happens at startup and when you ask for a line that has run out.

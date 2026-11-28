@@ -49,7 +49,8 @@ FACES = ("normal", "happy", "excited", "love", "wink", "smug", "curious", "angry
          "cry", "dizzy", "surprised", "sad", "worried", "sleep", "think", "talk",
          "spin", "glitch")
 EFFECTS = ("music", "sparkles", "hearts", "zzz")
-ACTS = ("think", "glitch", "nap", "dance", "update", "spin", "skate", "moonwalk", "lean")
+ACTS = ("think", "glitch", "nap", "dance", "update", "spin", "skate", "moonwalk", "lean",
+        "skip")
 EVENTS = ("done", "prompt")  # Claude Code: a task finished / you sent a prompt
 
 
